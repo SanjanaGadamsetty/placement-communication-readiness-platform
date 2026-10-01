@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.models.schemas import (
+    CombinedEvalResult,
     ConfigUpdateRequest,
     ConfigUpdateResponse,
+    EvaluateResponseMetadata,
     GeneratedQuestionResponse,
     ListeningEvaluationRequest,
     ListeningEvaluationResponse,
@@ -15,6 +19,7 @@ from app.models.schemas import (
     TurnEvaluationResponse,
 )
 from app.config import settings
+from app.services import audio_analyzer, stt_service
 from app.services.llm_client import get_llm_client, update_llm_config
 
 router = APIRouter(prefix="/ai", tags=["interview"])
@@ -93,6 +98,120 @@ def evaluate_listening(req: ListeningEvaluationRequest) -> ListeningEvaluationRe
         return ListeningEvaluationResponse(**raw)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}") from exc
+
+
+@router.post("/evaluate-response")
+async def evaluate_response(
+    audio: UploadFile = File(...),
+    metadata: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+) -> StreamingResponse:
+    """
+    POST /ai/evaluate-response — multipart/form-data, returns text/event-stream SSE.
+
+    SSE event types:
+      text_chunk  — raw LLM token delta  {"type": "text_chunk", "text": "..."}
+      text_end    — LLM stream finished  {"type": "text_end"}
+      result      — full parsed response {"type": "result", "data": CombinedEvalResult}
+      error       — pipeline failure     {"type": "error", "message": "..."}
+
+    Architecture:
+      Stage 1 (parallel): STT  ∥  waveform signal analysis  ∥  vector retrieval
+      Stage 2 (streaming): conduct_interview_stream() — yields LLM token chunks
+      Stage 3 (background): upsert context_summary to pgvector (non-blocking)
+      Stage 4 (sync): merge transcript-derived filler count into audio metrics
+    """
+    from app.services.vector_store import retrieve_relevant, upsert_summary
+
+    try:
+        meta = EvaluateResponseMetadata.model_validate_json(metadata)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid metadata JSON: {exc}") from exc
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio payload")
+
+    async def _stream():
+        # Stage 1: parallel
+        stt_task = asyncio.create_task(stt_service.transcribe(audio_bytes))
+        signal_task = asyncio.create_task(audio_analyzer.analyze_signal(audio_bytes))
+        vector_task = asyncio.create_task(
+            retrieve_relevant(session_id=meta.session_id, query_text=meta.question_text, top_k=3)
+        )
+
+        try:
+            transcript, signal_metrics, long_term_chunks = await asyncio.gather(
+                stt_task, signal_task, vector_task
+            )
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Stage 1 error: {exc}'})}\n\n"
+            return
+
+        # Stage 2: stream LLM tokens
+        full_response = ""
+        try:
+            async for chunk in get_llm_client().conduct_interview_stream(
+                transcript=transcript,
+                meta=meta,
+                long_term_chunks=long_term_chunks,
+            ):
+                full_response += chunk
+                yield f"data: {json.dumps({'type': 'text_chunk', 'text': chunk})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'LLM error: {exc}'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'text_end'})}\n\n"
+
+        # Parse accumulated JSON
+        try:
+            raw = json.loads(full_response)
+        except json.JSONDecodeError as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'JSON parse error: {exc}'})}\n\n"
+            return
+
+        tech_score = float(raw.get("technical_score", 5.0))
+        context_summary = str(raw.get("context_summary", ""))
+
+        # Stage 3: background vector upsert
+        if context_summary and meta.session_id:
+            background_tasks.add_task(
+                upsert_summary,
+                meta.session_id,
+                meta.turn_number,
+                context_summary,
+            )
+
+        # Stage 4: merge audio metrics
+        final_audio = audio_analyzer.finalize_metrics(
+            signal_metrics=signal_metrics,
+            transcript=transcript,
+            duration_sec=None,
+        )
+
+        result = CombinedEvalResult(
+            transcript=transcript,
+            stt_raw=transcript,
+            technical_score=tech_score,
+            feedback=str(raw.get("feedback", "")),
+            strengths=str(raw.get("strengths", "")),
+            weaknesses=str(raw.get("weaknesses", "")),
+            next_recommended_difficulty=str(raw.get("next_recommended_difficulty", "EASY")),
+            conversational_response=str(raw.get("conversational_response", "")),
+            next_question_text=str(raw.get("next_question_text", "")),
+            rubric_for_next_question=raw.get("rubric_for_next_question") or {},
+            update_state=raw.get("update_state") or {},
+            context_summary=context_summary,
+            pace_wpm=final_audio.pace_wpm,
+            filler_count=final_audio.filler_count,
+            fluency_score=final_audio.fluency_score,
+            clarity_score=final_audio.clarity_score,
+        )
+
+        yield f"data: {json.dumps({'type': 'result', 'data': result.model_dump()})}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @router.post("/config", response_model=ConfigUpdateResponse)

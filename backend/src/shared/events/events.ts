@@ -15,9 +15,14 @@ export interface UserRegisteredPayload {
 }
 
 export interface AttemptCompletedPayload {
-  sessionId: string;
+  attemptId: string;
+  assessmentId: string;
   studentId: string;
+  assessmentType: string;
+  technicalScore: number;
+  communicationScore: number;
   overallScore: number;
+  reportId: string | null;
 }
 
 export interface ChecklistItemToggledPayload {
@@ -31,4 +36,6 @@ export interface MentorVerifiedPayload {
   studentId: string;
   mentorId: string;
   verifiedAt: string;
+  checklistItemId: string | null;
+  outcome: 'VERIFIED' | 'REJECTED';
 }
