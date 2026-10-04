@@ -11,6 +11,7 @@ import { Events } from '../shared/events/events';
 import { authenticate, AuthRequest } from '../middleware/authenticate';
 import { requireRole, requireStudentSelfOrStaff } from '../middleware/authorize';
 import { env } from '../config/env';
+import { cache } from '../services/cacheService';
 
 export const studentRouter = Router();
 
@@ -29,6 +30,17 @@ studentRouter.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { studentId } = req.params;
+      const key = `student:profile:${studentId}`;
+      const cached = await cache.get<{ student: unknown }>(key);
+      if (cached) {
+        const s = cached.student as Record<string, unknown>;
+        if (req.user!.role === 'STUDENT' && s.user_id !== req.user!.id) {
+          throw new AppError(403, 'Access denied', 'FORBIDDEN');
+        }
+        sendSuccess(res, cached);
+        return;
+      }
+
       const { rows } = await db.query(
         `SELECT s.id, s.roll_number, s.batch_id, s.subdivision_id, s.coding_handles,
                 s.resume_url, s.resume_verified, s.created_at, s.updated_at,
@@ -41,12 +53,13 @@ studentRouter.get(
       if (rows.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
 
       const student = rows[0];
-      // STUDENT may only access their own record
       if (req.user!.role === 'STUDENT' && student.user_id !== req.user!.id) {
         throw new AppError(403, 'Access denied', 'FORBIDDEN');
       }
 
-      sendSuccess(res, { student });
+      const data = { student };
+      await cache.set(key, data, 300);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -77,7 +90,6 @@ studentRouter.patch(
       const { studentId } = req.params;
       const user = req.user!;
 
-      // Fetch student to verify ownership for STUDENT role
       const { rows: existing } = await db.query(
         'SELECT id, user_id, coding_handles FROM org.students WHERE id = $1',
         [studentId]
@@ -104,6 +116,7 @@ studentRouter.patch(
         [JSON.stringify(merged), studentId]
       );
 
+      await cache.del(`student:profile:${studentId}`);
       sendSuccess(res, { student: rows[0] });
     } catch (err) {
       sendError(res, err);
@@ -146,6 +159,7 @@ studentRouter.patch(
         [resumeUrl, studentId]
       );
 
+      await cache.del(`student:profile:${studentId}`);
       sendSuccess(res, { resumeUrl: rows[0].resume_url });
     } catch (err) {
       sendError(res, err);
@@ -181,6 +195,7 @@ studentRouter.patch(
       const payload = { studentId, mentorId, verifiedAt: new Date().toISOString() };
       eventBus.emit(Events.MENTOR_VERIFIED, payload);
 
+      await cache.del(`student:profile:${studentId}`);
       sendSuccess(res, { message: 'Resume verified' });
     } catch (err) {
       sendError(res, err);

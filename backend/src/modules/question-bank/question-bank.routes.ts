@@ -5,6 +5,9 @@ import { AppError } from '../../shared/errors/AppError';
 import { sendSuccess, sendError } from '../../shared/helpers/response';
 import { authenticate, AuthRequest } from '../../middleware/authenticate';
 import { requireRole } from '../../middleware/authorize';
+import { cache } from '../../services/cacheService';
+
+const QBANK_CACHE_KEY = 'qbank:all';
 
 export const questionBankRouter = Router();
 
@@ -33,6 +36,9 @@ questionBankRouter.get(
   requireRole(...BANK_READER_ROLES),
   async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
+      const cached = await cache.get<{ questions: unknown[] }>(QBANK_CACHE_KEY);
+      if (cached) { sendSuccess(res, cached); return; }
+
       const { rows } = await db.query(
         `SELECT q.id, q.question_text, q.difficulty, q.evaluation_criteria,
                 q.metadata, q.is_active, q.created_at,
@@ -43,7 +49,9 @@ questionBankRouter.get(
          GROUP BY q.id
          ORDER BY q.created_at DESC`
       );
-      sendSuccess(res, { questions: rows });
+      const data = { questions: rows };
+      await cache.set(QBANK_CACHE_KEY, data, 600);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -86,6 +94,7 @@ questionBankRouter.post(
         }
 
         await client.query('COMMIT');
+        await cache.del(QBANK_CACHE_KEY);
         sendSuccess(res, { question: item }, 201);
       } catch (err) {
         await client.query('ROLLBACK');
@@ -131,6 +140,7 @@ questionBankRouter.put(
          RETURNING id, question_text, difficulty, evaluation_criteria, metadata, is_active, updated_at`,
         vals
       );
+      await cache.del(QBANK_CACHE_KEY);
       sendSuccess(res, { question: rows[0] });
     } catch (err) {
       sendError(res, err);
@@ -153,6 +163,7 @@ questionBankRouter.delete(
         [id]
       );
       if (rows.length === 0) throw new AppError(404, 'Question not found', 'NOT_FOUND');
+      await cache.del(QBANK_CACHE_KEY);
       sendSuccess(res, { message: 'Question deactivated' });
     } catch (err) {
       sendError(res, err);

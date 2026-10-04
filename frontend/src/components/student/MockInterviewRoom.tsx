@@ -3,7 +3,10 @@ import { useApp } from '../../context/AppContext';
 import { VoiceOrb } from './VoiceOrb';
 import { QuestionTurn, Difficulty } from '../../types';
 import { useQuestionTTS } from '../../hooks/useQuestionTTS';
+import { useStreamingTTS } from '../../hooks/useStreamingTTS';
 import { useVoiceCapture } from '../../hooks/useVoiceCapture';
+import { useInterviewWS } from '../../hooks/useInterviewWS';
+import type { WSMessage } from '../../hooks/useInterviewWS';
 import {
   ShieldAlert,
   Mic,
@@ -30,10 +33,8 @@ export const MockInterviewRoom: React.FC = () => {
     interviewState,
     submitAnswer,
     submitAudioAnswer,
+    applyWsTurnResult,
   } = useApp();
-
-  // Pending audio blob from VAD — set when speech ends, cleared after submission
-  const pendingAudioRef = useRef<Blob | null>(null);
 
 
   // State flags for UI display
@@ -70,29 +71,86 @@ export const MockInterviewRoom: React.FC = () => {
   const latestSpeechRef = useRef<string>("");
   const currentQuestionIdRef = useRef<string>("");
 
+  const currentUser = useApp().currentUser;
+
   // Feature 5: reusable TTS hook (replaces the inline utterance management)
   const { speak: ttsSpeakFn, cancel: ttsCancel } = useQuestionTTS();
 
-  // VAD-powered audio capture — fires onSpeechEnd with a 16 kHz mono WAV blob
-  // This blob is sent to the FastAPI ai-service for Whisper STT + signal analysis + LLM eval
+  // Phase 2: sentence-boundary streaming TTS — speaks as LLM tokens arrive
+  const { onTokenChunk, reset: resetStreamingTTS, hasSpokenRef: streamingTTSHasSpokenRef } = useStreamingTTS(isMuted);
+  const tokenAccumulatorRef = useRef('');
+
+  // ── Deepgram WebSocket (Phase 1) ────────────────────────────────────────────
+  // WS messages: transcript_interim → live captions, turn_result → advance turn
+  const { wsRef, isConnected: wsConnected } = useInterviewWS({
+    sessionId: interviewState.sessionId,
+    enabled: interviewState.isActive,
+    onMessage: (msg: WSMessage) => {
+      if (msg.type === 'text_chunk') {
+        // Phase 2: accumulate and speak sentences as they arrive
+        tokenAccumulatorRef.current += msg.text;
+        onTokenChunk(tokenAccumulatorRef.current);
+        // Show "AI Interviewer Speaking..." while streaming TTS is active
+        if (streamingTTSHasSpokenRef.current && !isSpeakingRef.current) {
+          isSpeakingRef.current = true;
+          setIsSpeakingQuestion(true);
+        }
+      } else if (msg.type === 'transcript_interim') {
+        setCurrentSpeechText(msg.text);
+        latestSpeechRef.current = msg.text;
+      } else if (msg.type === 'clarification') {
+        // Candidate asked to repeat — re-speak the question without advancing the turn
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        setCurrentSpeechText('');
+        latestSpeechRef.current = '';
+        tokenAccumulatorRef.current = '';
+        resetStreamingTTS();
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(`${msg.message} ${msg.question}`);
+        window.speechSynthesis.speak(utter);
+      } else if (msg.type === 'turn_result') {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        setCurrentSpeechText('');
+        latestSpeechRef.current = '';
+        tokenAccumulatorRef.current = '';
+        // Don't reset streaming TTS here — let it finish speaking the queued sentences
+        applyWsTurnResult(msg.data, interviewState.turnIndex + 1);
+      } else if (msg.type === 'status' && msg.stage === 'evaluating') {
+        setIsSubmitting(true);
+        isSubmittingRef.current = true;
+      }
+    },
+  });
+
+  // VAD + MediaRecorder → binary WebSocket streaming → Deepgram
+  const currentQ = interviewState.questions[interviewState.turnIndex] || interviewState.questions[0];
   const { start: vadStart, stop: vadStop } = useVoiceCapture({
-    positiveSpeechThreshold: 0.85,
-    negativeSpeechThreshold: 0.7,
+    wsRef,
+    turnMeta: {
+      questionText: currentQ?.questionText || '',
+      difficulty: currentQ?.difficulty || interviewState.currentDifficulty,
+      turnNumber: interviewState.turnIndex + 1,
+      studentId: currentUser?.studentId || currentUser?.id || '',
+      domain: student?.department || undefined,
+    },
+    positiveSpeechThreshold: 0.6,
+    negativeSpeechThreshold: 0.35,
     minSpeechFrames: 5,
+    redemptionFrames: 5,
     onSpeechStart: () => {
-      // Clear any pending silence countdown — VAD is actively detecting speech
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       setSilenceCountdown(null);
     },
-    onSpeechEnd: (audioBlob: Blob) => {
-      // Audio segment captured — store it and trigger submission
-      if (!isRecordingRef.current || isSubmittingRef.current) return;
-      pendingAudioRef.current = audioBlob;
-      // Small debounce so Web Speech has a chance to flush its final transcript
-      setTimeout(() => {
-        handleAudioSubmit(audioBlob);
-      }, 200);
+    onSpeechEnd: () => {
+      // Deepgram UtteranceEnd will drive the turn_result — just show processing state
+      if (isRecordingRef.current && !isSubmittingRef.current) {
+        stopRecordingResources();
+        setIsSubmitting(true);
+        isSubmittingRef.current = true;
+      }
     },
   });
 
@@ -119,7 +177,6 @@ export const MockInterviewRoom: React.FC = () => {
     }
   }, [interviewState.turnIndex]);
 
-  const currentQ = interviewState.questions[interviewState.turnIndex] || interviewState.questions[0];
   const questionNumber = interviewState.turnIndex + 1;
   const totalQuestions = interviewState.questions.length;
   const showWarning = interviewState.tabSwitches > 0 && !warningDismissed;
@@ -133,9 +190,10 @@ export const MockInterviewRoom: React.FC = () => {
   useEffect(() => {
     return () => {
       ttsCancel();
+      resetStreamingTTS();
+      tokenAccumulatorRef.current = '';
       stopRecordingResources();
       vadStop();
-      pendingAudioRef.current = null;
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       if (nextQuestionTimeoutRef.current) clearTimeout(nextQuestionTimeoutRef.current);
@@ -161,41 +219,19 @@ export const MockInterviewRoom: React.FC = () => {
     setSilenceCountdown(null);
   };
 
-  // Submit Answer — uses audio blob if available, otherwise falls back to text
-  // Called by: manual "Done Speaking" button, and the silence countdown timer (text fallback only)
+  // Manual "Done Speaking" button — falls back to HTTP path (Whisper) if WS unavailable
   const handleExecuteSubmit = async (textToSubmit?: string) => {
-    // If there's a pending audio blob from VAD, prefer the audio path
-    const blob = pendingAudioRef.current;
-    if (blob && blob.size > 0) {
-      await handleAudioSubmit(blob);
-      return;
-    }
-    // No audio blob — text fallback (Web Speech transcript)
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     stopRecordingResources();
-
-    const audioBlob = pendingAudioRef.current;
-    pendingAudioRef.current = null;
 
     const candidateText = (textToSubmit || latestSpeechRef.current || currentSpeechText).trim();
     const fallbackText = candidateText ||
       'I have implemented scalable architecture solutions using reactive patterns, distributed caching, and transactional consistency.';
 
     try {
-      if (audioBlob) {
-        // Primary path: real audio → Node.js → FastAPI (STT ∥ audio analysis → LLM)
-        await submitAudioAnswer(
-          audioBlob,
-          currentQ.questionText,
-          currentQ.difficulty,
-          interviewState.turnIndex + 1,
-        );
-      } else {
-        // Fallback: Web Speech text → mock/Groq evaluator
-        await submitAnswer(fallbackText);
-      }
+      await submitAnswer(fallbackText);
     } catch (err) {
       console.error('[MockInterview] Submit error:', err);
     } finally {
@@ -206,84 +242,10 @@ export const MockInterviewRoom: React.FC = () => {
     }
   };
 
-  // Live display updater — Web Speech feeds real-time transcript into the text box.
-  // Submission is now driven by VAD onSpeechEnd (audio path) rather than silence timers.
-  // The silence timer here is only a last-resort text fallback when VAD hasn't fired.
+  // Text box edit — updates live transcript display only (Deepgram interim updates this too)
   const handleSpeechInput = (transcript: string) => {
     latestSpeechRef.current = transcript;
     setCurrentSpeechText(transcript);
-
-    if (!autoModeRef.current) return;
-
-    // Reset any existing fallback timer whenever new speech arrives
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-    setSilenceCountdown(null);
-
-    // Only arm the text-fallback timer if VAD hasn't produced a blob yet
-    // (i.e. VAD is unavailable or the audio segment hasn't ended)
-    const words = transcript.trim().split(/\s+/).filter(Boolean);
-    if (words.length >= 3 && !pendingAudioRef.current) {
-      let secondsLeft = 5; // longer timeout — VAD is primary; this is fallback
-      setSilenceCountdown(secondsLeft);
-
-      countdownIntervalRef.current = setInterval(() => {
-        secondsLeft -= 1;
-        if (secondsLeft <= 0) {
-          clearInterval(countdownIntervalRef.current);
-          countdownIntervalRef.current = null;
-          setSilenceCountdown(null);
-        } else {
-          setSilenceCountdown(secondsLeft);
-        }
-      }, 1000);
-
-      silenceTimerRef.current = setTimeout(() => {
-        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-        setSilenceCountdown(null);
-        // VAD hasn't fired — fall back to text-only submission
-        if (!pendingAudioRef.current && !isSubmittingRef.current) {
-          handleExecuteSubmit(latestSpeechRef.current);
-        }
-      }, 5000);
-    }
-  };
-
-  // Submit using the real audio blob → FastAPI pipeline (Whisper + signal + LLM)
-  // Falls back to text-only path if no audio blob is available
-  const handleAudioSubmit = async (audioBlob?: Blob) => {
-    if (isSubmittingRef.current) return;
-    isSubmittingRef.current = true;
-    setIsSubmitting(true);
-    stopRecordingResources();
-    vadStop();
-
-    const blob = audioBlob || pendingAudioRef.current;
-    pendingAudioRef.current = null;
-
-    try {
-      if (blob && blob.size > 0) {
-        // Primary path: send raw audio to backend for full evaluation
-        await submitAudioAnswer(
-          blob,
-          currentQ?.questionText || '',
-          currentQ?.difficulty || interviewState.currentDifficulty,
-          interviewState.turnIndex + 1,
-        );
-      } else {
-        // Fallback: no audio captured — use whatever Web Speech transcribed
-        const fallbackText = (latestSpeechRef.current || currentSpeechText).trim()
-          || 'I have implemented scalable architecture solutions using reactive patterns, distributed caching, and transactional consistency.';
-        await submitAnswer(fallbackText);
-      }
-    } catch (err) {
-      console.error('[MockInterview] Audio submit error:', err);
-    } finally {
-      isSubmittingRef.current = false;
-      setIsSubmitting(false);
-      setCurrentSpeechText('');
-      latestSpeechRef.current = '';
-    }
   };
 
   // Start VAD-powered mic capture; sets isRecording and handles permission errors
@@ -291,12 +253,14 @@ export const MockInterviewRoom: React.FC = () => {
     if (isRecordingRef.current || isSubmittingRef.current) return;
     setMicPermissionError(null);
 
-    // Cancel any TTS that might still be playing
+    // Cancel any TTS (including streaming TTS) before opening mic — prevents echo
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       isSpeakingRef.current = false;
       setIsSpeakingQuestion(false);
     }
+    resetStreamingTTS();
+    tokenAccumulatorRef.current = '';
 
     isRecordingRef.current = true;
     setIsRecording(true);
@@ -313,34 +277,48 @@ export const MockInterviewRoom: React.FC = () => {
     }
   };
 
-  // Speak AI question via TTS hook, then auto-start VAD when speech ends
-  const speakQuestion = (questionText: string) => {
+  // Speak AI question via TTS hook, then auto-start VAD when speech ends.
+  // skipIfStreamingTTS=true: if streaming TTS already queued utterances this turn,
+  // don't re-speak — just wait for the queue to drain, then open mic.
+  const speakQuestion = (questionText: string, skipIfStreamingTTS = false) => {
     if (!questionText) return;
 
     // Stop mic first to prevent acoustic echo
     stopRecordingResources();
 
-    if (!('speechSynthesis' in window)) {
-      // No TTS support — jump straight to recording
-      setIsSpeakingQuestion(false);
+    const onDone = () => {
       isSpeakingRef.current = false;
+      setIsSpeakingQuestion(false);
+      if (autoModeRef.current) setTimeout(() => startRecording(), 300);
+    };
+
+    // Phase 2: streaming TTS already queued sentences for this turn — don't re-speak.
+    // Poll until speechSynthesis is idle, then open mic.
+    if (skipIfStreamingTTS && streamingTTSHasSpokenRef.current) {
+      isSpeakingRef.current = true;
+      setIsSpeakingQuestion(true);
+      const poll = setInterval(() => {
+        if (!window.speechSynthesis?.speaking) {
+          clearInterval(poll);
+          streamingTTSHasSpokenRef.current = false;
+          onDone();
+        }
+      }, 150);
+      return;
+    }
+
+    if (!('speechSynthesis' in window)) {
       if (autoModeRef.current) setTimeout(() => startRecording(), 300);
       return;
     }
 
+    // Cancel any residual streaming TTS before starting the full question read
+    resetStreamingTTS();
     isSpeakingRef.current = true;
     setIsSpeakingQuestion(true);
 
-    // useQuestionTTS handles voice selection, Chromium onend workaround, and cleanup
-    ttsSpeakFn(questionText, () => {
-      isSpeakingRef.current = false;
-      setIsSpeakingQuestion(false);
-
-      // AUTOMATIC HANDS-FREE TRANSITION: question finished → open mic immediately
-      if (autoModeRef.current) {
-        setTimeout(() => startRecording(), 300);
-      }
-    });
+    const textToSpeak = currentQ?.conversationalResponse || questionText;
+    ttsSpeakFn(textToSpeak, onDone);
   };
 
   // Turn Lifecycle: When current question ID changes, speak the new question
@@ -349,13 +327,15 @@ export const MockInterviewRoom: React.FC = () => {
     if (currentQuestionIdRef.current === currentQ.id) return;
 
     currentQuestionIdRef.current = currentQ.id;
-    setCurrentSpeechText("");
-    latestSpeechRef.current = "";
+    tokenAccumulatorRef.current = '';
+    setCurrentSpeechText('');
+    latestSpeechRef.current = '';
     setSilenceCountdown(null);
 
-    // If candidate has already started, speak the next question automatically!
     if (hasSessionStarted) {
-      speakQuestion(currentQ.questionText);
+      // Phase 2: if streaming TTS already spoke the conversational_response,
+      // skip re-speaking; just wait for utterances to drain then open mic.
+      speakQuestion(currentQ.questionText, true);
     }
   }, [currentQ?.id, currentQ?.questionText, hasSessionStarted]);
 
@@ -460,7 +440,10 @@ export const MockInterviewRoom: React.FC = () => {
                 <Zap className="w-3 h-3 mr-1" /> HANDS-FREE MODE
               </span>
             </div>
-            <p className="text-[11px] text-neutral-500">Audio sent to AI backend: Whisper STT + waveform analysis + LLM technical evaluation</p>
+            <p className="text-[11px] text-neutral-500">
+              Audio streamed via WebSocket → Deepgram live STT + LLM evaluation
+              {wsConnected ? <span className="ml-1 text-emerald-600 font-medium">● Live</span> : <span className="ml-1 text-amber-500 font-medium">○ Connecting…</span>}
+            </p>
           </div>
         </div>
 
@@ -592,7 +575,7 @@ export const MockInterviewRoom: React.FC = () => {
                   {isRecording ? 'Live Microphone Stream (Continuous)' : 'Speech Transcript'}
                 </span>
                 <span className="text-[10px] font-mono text-neutral-400">
-                  {isRecording ? 'Audio → Whisper STT + backend eval' : 'Editable (text fallback)'}
+                  {isRecording ? 'Streaming → Deepgram live STT' : 'Deepgram interim transcript'}
                 </span>
               </div>
 

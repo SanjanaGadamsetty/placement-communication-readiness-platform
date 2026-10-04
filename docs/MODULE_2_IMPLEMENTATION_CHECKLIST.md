@@ -454,9 +454,9 @@ const paceScore = response.is_pace_optimal ? 100 :
 
 // Communication composite
 const commScore = (
-  response.fluency_score * 0.35 +
-  paceScore * 0.25 +
-  fillerScore * 0.20 +
+  fillerPenalty * 0.7 +  // fillerPenalty = max(0, 100 - filler_count * 5)
+  // NOTE: actual formula is fillerPenalty * 0.7 + clarity_score * 0.3
+  // (pace and fluency components removed — pace_wpm stubbed, fluency from filler count)
   response.clarity_score * 0.20
 );
 
@@ -661,7 +661,7 @@ INITIALIZED
 - [ ] Score formula: `fillerScore = max(0, 100 - filler_count × 5)` verified
 - [ ] `filler_count = 0` → `fillerScore = 100`
 - [ ] `filler_count = 20` → `fillerScore = 0` (not negative)
-- [ ] `comm_avg = fluency×0.35 + pace×0.25 + filler×0.20 + clarity×0.20` verified
+- [x] `comm_score = fillerPenalty×0.7 + clarity×0.3` verified (fillerPenalty = max(0, 100 − filler_count×5))
 - [ ] `overall = tech×0.70 + comm×0.30` verified
 - [ ] Session state machine: INITIALIZED → ACTIVE → COMPLETED transitions
 - [ ] Session state machine: double-start rejected (student already has active session)

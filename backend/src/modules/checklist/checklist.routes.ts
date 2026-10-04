@@ -8,6 +8,7 @@ import { requireRole } from '../../middleware/authorize';
 import { eventBus } from '../../shared/events/eventBus';
 import { Events } from '../../shared/events/events';
 import { EligibilityService } from '../placement/eligibility.service';
+import { cache } from '../../services/cacheService';
 
 export const checklistRouter = Router();
 
@@ -18,6 +19,10 @@ checklistRouter.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const programId = req.query.programId as string | undefined;
+      const key = `checklist:items:${programId ?? 'all'}`;
+      const cached = await cache.get<{ items: unknown[] }>(key);
+      if (cached) { sendSuccess(res, cached); return; }
+
       const { rows } = await db.query(
         `SELECT id, program_id, subdivision_id, name, description, category,
                 max_score, weight, is_required, is_active, created_at
@@ -26,7 +31,9 @@ checklistRouter.get(
          ORDER BY is_required DESC, name ASC`,
         [programId ?? null]
       );
-      sendSuccess(res, { items: rows });
+      const data = { items: rows };
+      await cache.set(key, data, 120);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -62,8 +69,8 @@ checklistRouter.post(
         [d.programId, d.subdivisionId ?? null, d.name, d.description ?? null,
          d.category ?? null, d.maxScore ?? null, d.weight ?? null, d.isRequired]
       );
-      res.status(201);
-      sendSuccess(res, { item: rows[0] });
+      await cache.delPattern('checklist:items:*');
+      sendSuccess(res, { item: rows[0] }, 201);
     } catch (err) {
       sendError(res, err);
     }
@@ -103,6 +110,7 @@ checklistRouter.post(
            row.category ?? null, row.isRequired]
         ).then(r => { if (r.rowCount && r.rowCount > 0) inserted++; });
       }
+      await cache.delPattern('checklist:items:*');
       sendSuccess(res, { inserted, total: rows.length });
     } catch (err) {
       sendError(res, err);
@@ -136,6 +144,7 @@ checklistRouter.put(
          d.maxScore ?? null, d.weight ?? null, d.isRequired ?? null, id]
       );
       if (rows.length === 0) throw new AppError(404, 'Checklist item not found', 'NOT_FOUND');
+      await cache.delPattern('checklist:items:*');
       sendSuccess(res, { item: rows[0] });
     } catch (err) {
       sendError(res, err);
@@ -157,6 +166,7 @@ checklistRouter.delete(
         [id]
       );
       if (rows.length === 0) throw new AppError(404, 'Checklist item not found', 'NOT_FOUND');
+      await cache.delPattern('checklist:items:*');
       res.status(204).end();
     } catch (err) {
       sendError(res, err);
@@ -179,7 +189,10 @@ checklistRouter.get(
       if (students.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
       const { id: studentId, batch_id } = students[0];
 
-      // Get program from batch
+      const key = `checklist:progress:${studentId}`;
+      const cached = await cache.get<object>(key);
+      if (cached) { sendSuccess(res, cached); return; }
+
       const { rows: batches } = await db.query(
         'SELECT program_id FROM org.batches WHERE id = $1',
         [batch_id]
@@ -196,7 +209,9 @@ checklistRouter.get(
          ORDER BY ci.is_required DESC, ci.name ASC`,
         [studentId, programId]
       );
-      sendSuccess(res, { studentId, items: rows });
+      const data = { studentId, items: rows };
+      await cache.set(key, data, 120);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -248,7 +263,11 @@ checklistRouter.post(
         [studentId, itemId, status, completionEvidence ?? null, score ?? null]
       );
 
-      // Fire event for notification (mentor to review)
+      await Promise.all([
+        cache.del(`checklist:progress:${studentId}`),
+        cache.del(`checklist:mentee:${studentId}`),
+      ]);
+
       eventBus.emit(Events.CHECKLIST_ITEM_TOGGLED, {
         studentId,
         itemId,
@@ -278,13 +297,16 @@ checklistRouter.get(
       const { studentId } = req.params;
       const userId = req.user!.id;
 
-      // Verify mentor is assigned to this student
       const { rows: assignments } = await db.query(
         `SELECT id FROM org.student_mentor_assignments
          WHERE student_id = $1 AND mentor_id = $2 AND is_active = TRUE`,
         [studentId, userId]
       );
       if (assignments.length === 0) throw new AppError(403, 'Not assigned to this student', 'FORBIDDEN');
+
+      const key = `checklist:mentee:${studentId}`;
+      const cached = await cache.get<object>(key);
+      if (cached) { sendSuccess(res, cached); return; }
 
       const { rows } = await db.query(
         `SELECT ci.id, ci.name, ci.description, ci.category, ci.max_score, ci.is_required,
@@ -296,7 +318,9 @@ checklistRouter.get(
          ORDER BY ci.is_required DESC, ci.name ASC`,
         [studentId]
       );
-      sendSuccess(res, { studentId, items: rows });
+      const data = { studentId, items: rows };
+      await cache.set(key, data, 120);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }

@@ -1,4 +1,3 @@
-
 # API Reference — Communication Readiness Platform
 
 > **Source of truth:** `docs/BACKEND_IMPLEMENTATION_PLAN.md`
@@ -140,9 +139,9 @@ All IDs are UUIDs (strings). Validate with `z.string().uuid()`. Non-UUID IDs →
 |---|---|---|---|---|---|
 | GET | `/api/students` | List students (paginated) | Yes | PROGRAM_ADMIN, TRAINER, PLACEMENT_COORDINATOR, FACULTY_MENTOR | MVP |
 | GET | `/api/students/:id` | Get student profile | Yes | Authenticated (own or authorized) | MVP |
-| PUT | `/api/students/:id` | Update student profile | Yes | STUDENT (own) or PROGRAM_ADMIN | MVP |
+| PATCH | `/api/students/:id` | Update student profile | Yes | STUDENT (own) or COLLEGE_ADMIN | MVP |
 | PUT | `/api/students/:id/coding-handles` | Update LeetCode, GitHub handles | Yes | STUDENT (own) | MVP |
-| POST | `/api/students/:id/resume` | Upload resume PDF | Yes | STUDENT (own) | MVP |
+| PATCH | `/api/students/:id/resume` | Upload resume PDF/DOCX, triggers LLM parsing | Yes | STUDENT (own) | MVP |
 
 **POST /api/students/:id/resume**
 ```
@@ -176,10 +175,10 @@ Response 200: { "data": { "resumeId": "uuid", "fileUrl": "string", "uploadedAt":
 
 | Method | Endpoint | Purpose | Auth | Allowed Roles | Scope |
 |---|---|---|---|---|---|
-| GET | `/api/institutions` | Get institution info | Yes | Any authenticated | MVP |
+| GET | `/api/org/institutions` | Get institution info | Yes | Any authenticated | MVP |
 | GET | `/api/departments` | List departments | Yes | Any authenticated | MVP |
-| GET | `/api/programs` | List programs | Yes | Any authenticated | MVP |
-| GET | `/api/batches` | List batches | Yes | Any authenticated | MVP |
+| GET | `/api/org/programs` | List programs | Yes | Any authenticated | MVP |
+| GET | `/api/org/batches` | List batches | Yes | Any authenticated | MVP |
 | GET | `/api/subdivisions` | List subdivisions (domains) | Yes | Any authenticated | MVP |
 
 ---
@@ -188,11 +187,11 @@ Response 200: { "data": { "resumeId": "uuid", "fileUrl": "string", "uploadedAt":
 
 | Method | Endpoint | Purpose | Auth | Allowed Roles | Scope |
 |---|---|---|---|---|---|
-| POST | `/api/admin/faculty-mentors` | Create a FACULTY_MENTOR account | Yes | PLACEMENT_COORDINATOR | MVP |
-| GET | `/api/admin/faculty-mentors` | List faculty mentors | Yes | PROGRAM_ADMIN, PLACEMENT_COORDINATOR | MVP |
-| POST | `/api/admin/program-admins` | Create a PROGRAM_ADMIN account | Yes | PLACEMENT_COORDINATOR | MVP |
-| GET | `/api/admin/program-admins` | List program admins | Yes | PLACEMENT_COORDINATOR | MVP |
-| POST | `/api/admin/coordinators` | Create another PLACEMENT_COORDINATOR | Yes | PLACEMENT_COORDINATOR | MVP |
+| POST | `/api/admin/users` | Create staff account (FACULTY_MENTOR / TRAINER / PLACEMENT_COORDINATOR / COLLEGE_ADMIN / PROGRAM_ADMIN) — sends welcome email via Resend | Yes | SUPER_ADMIN or COLLEGE_ADMIN | MVP |
+| GET | `/api/admin/users` | List all users | Yes | SUPER_ADMIN or COLLEGE_ADMIN | MVP |
+| PATCH | `/api/admin/users/:id/role` | Change a user's role | Yes | SUPER_ADMIN or COLLEGE_ADMIN | MVP |
+| PATCH | `/api/admin/users/:id/status` | Suspend / activate a user | Yes | SUPER_ADMIN or COLLEGE_ADMIN | MVP |
+| POST | `/api/auth/change-password` | Change own password (invalidates existing sessions) | Yes | Any authenticated | MVP |
 
 ---
 
@@ -637,25 +636,25 @@ Use this to track implementation progress.
 - [ ] `POST /api/auth/logout`
 - [ ] `GET /api/students`
 - [ ] `GET /api/students/:id`
-- [ ] `PUT /api/students/:id`
-- [ ] `PUT /api/students/:id/coding-handles`
-- [ ] `POST /api/students/:id/resume`
+- [x] `PATCH /api/students/:id`
+- [ ] `PATCH /api/students/:id/coding-handles`
+- [x] `PATCH /api/students/:id/resume` (PDF/DOCX upload + LLM parsing)
 - [ ] `GET /api/mentor-assignments/my-mentees`
 - [ ] `POST /api/mentor-assignments`
 - [ ] `DELETE /api/mentor-assignments/:id`
 - [ ] `POST /api/trainer-assignments`
 - [ ] `PUT /api/trainer-assignments/:id/revoke`
 - [ ] `GET /api/trainer-assignments`
-- [ ] `GET /api/institutions`
+- [x] `GET /api/org/institutions`
 - [ ] `GET /api/departments`
-- [ ] `GET /api/programs`
-- [ ] `GET /api/batches`
+- [x] `GET /api/org/programs`
+- [x] `GET /api/org/batches`
 - [ ] `GET /api/subdivisions`
-- [ ] `POST /api/admin/faculty-mentors`
-- [ ] `GET /api/admin/faculty-mentors`
-- [ ] `POST /api/admin/program-admins`
-- [ ] `GET /api/admin/program-admins`
-- [ ] `POST /api/admin/coordinators`
+- [x] `POST /api/admin/users` (unified staff creation with Resend email)
+- [x] `GET /api/admin/users`
+- [x] `PATCH /api/admin/users/:id/role`
+- [x] `PATCH /api/admin/users/:id/status`
+- [x] `POST /api/auth/change-password`
 
 #### Member 2
 - [ ] `GET /api/assessments`

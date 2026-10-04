@@ -106,7 +106,6 @@ class LLMInterviewResponse(BaseModel):
     The exact JSON the LLM must return from a single conduct_interview call.
     Parsed and validated before being used by the router.
     """
-    analysis: str = ""
     update_state: StateUpdate = Field(default_factory=StateUpdate)
     conversational_response: str = ""          # spoken to candidate (TTS)
     next_question_text: str = ""               # clean question only, stored in DB
@@ -150,6 +149,9 @@ class CombinedEvalResult(BaseModel):
     filler_count: int = 0
     fluency_score: float = 0.0
     clarity_score: float = 0.0
+
+    # True when candidate asked to repeat rather than answering — Node.js skips all storage
+    is_clarification: bool = False
 
 
 # ── Legacy endpoints (kept unchanged) ─────────────────────────────────────────
@@ -200,6 +202,12 @@ class ListeningEvaluationResponse(BaseModel):
     accuracy_level: str
     feedback: str
     missed_key_points: list[str] = Field(default_factory=list)
+
+
+class EvaluateResponseTextRequest(BaseModel):
+    """Request body for /ai/evaluate-response-text — pre-transcribed text path."""
+    transcript: str
+    metadata: EvaluateResponseMetadata
 
 
 class ConfigUpdateRequest(BaseModel):

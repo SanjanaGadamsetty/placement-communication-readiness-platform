@@ -12,7 +12,7 @@ An AI-powered mock interview and communication readiness platform for a single c
 assessments; the system evaluates their responses via a FastAPI AI service backed by an LLM,
 computes communication and technical scores, and generates diagnostic reports.
 
-**Five user roles:** STUDENT, FACULTY_MENTOR, PROGRAM_ADMIN, TRAINER, PLACEMENT_COORDINATOR
+**Seven user roles:** STUDENT, FACULTY_MENTOR, COLLEGE_ADMIN (per-college), PROGRAM_ADMIN (per-program within college), TRAINER, PLACEMENT_COORDINATOR, SUPER_ADMIN (platform-wide)
 
 **Tech stack:**
 - Backend: Node.js + Express (TypeScript) — modular monolith

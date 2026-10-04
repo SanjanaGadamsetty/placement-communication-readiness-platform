@@ -25,6 +25,7 @@ import { requireRole } from '../middleware/authorize';
 import { env } from '../config/env';
 import { sessionContextService, TurnContext, InterviewState } from '../services/sessionContextService';
 import { wsManager } from '../services/wsManager';
+import { cache } from '../services/cacheService';
 
 export const interviewRouter = Router();
 
@@ -75,10 +76,6 @@ const TurnMetadataSchema = z.object({
   difficulty: z.enum(['EASY', 'MEDIUM', 'ADVANCED']).default('EASY'),
   turnNumber: z.coerce.number().int().min(1),
   domain: z.string().optional(),
-});
-
-const ConcludeSessionSchema = z.object({
-  overallScore: z.number().min(0).max(100),
 });
 
 const BankFallbackQuerySchema = z.object({
@@ -164,10 +161,9 @@ function normaliseScores(raw: RawEvaluation): {
   overallScore: number;
 } {
   const technicalScore = Math.round(raw.technical_score * 10);
-  const fillerPenalty = Math.max(0, 100 - raw.filler_count * 5); // guard against negative
-  const communicationScore = Math.round(
-    fillerPenalty * 0.4 + raw.fluency_score * 0.3 + raw.clarity_score * 0.3,
-  );
+  const fillerPenalty = Math.max(0, 100 - raw.filler_count * 5);
+  // clarity_score is already 0-100; no × 10. fluency_score omitted (still 0 on audio-less path).
+  const communicationScore = Math.round(fillerPenalty * 0.7 + raw.clarity_score * 0.3);
   const overallScore = Math.round(technicalScore * 0.7 + communicationScore * 0.3);
   return {
     technicalScore: Math.max(0, Math.min(100, technicalScore)),
@@ -314,9 +310,23 @@ interviewRouter.post(
       // ── Pull full session context from Redis (parallel) ───────────────────
       const [interviewState, shortTermSummaries, resume] = await Promise.all([
         sessionContextService.getState(meta.sessionId).catch(() => null),
-        sessionContextService.getSummaries(meta.sessionId, 10).catch(() => [] as string[]),
+        sessionContextService.getSummaries(meta.sessionId, 5).catch(() => [] as string[]),
         sessionContextService.getResume(meta.sessionId).catch(() => null),
       ]);
+
+      // Fix 3: ownership check before any processing
+      if (interviewState) {
+        if (interviewState.student_id !== req.user!.id) {
+          throw new AppError(403, 'Access denied', 'FORBIDDEN');
+        }
+      } else {
+        const { rows: sessionRows } = await db.query<{ student_id: string }>(
+          'SELECT student_id FROM session.interview_sessions WHERE id = $1',
+          [meta.sessionId],
+        );
+        if (sessionRows.length === 0) throw new AppError(404, 'Session not found', 'NOT_FOUND');
+        if (sessionRows[0].student_id !== req.user!.id) throw new AppError(403, 'Access denied', 'FORBIDDEN');
+      }
 
       const currentRubric = interviewState?.current_rubric ?? null;
 
@@ -380,6 +390,7 @@ interviewRouter.post(
               current_question: raw.next_question_text ?? '',
               current_question_turn: meta.turnNumber + 1,
               current_rubric: raw.rubric_for_next_question ?? {},
+              overall_score: overallScore,
             })
             .catch(() => null)
         : null;
@@ -431,7 +442,7 @@ interviewRouter.post(
             await sessionContextService.checkpointToDb(meta.sessionId);
           }
 
-          await sessionContextService.flushToDb(meta.sessionId, meta.studentId);
+          await sessionContextService.flushToDb(meta.sessionId, req.user!.id);
         } catch (err) {
           console.error('[interview.routes] post-turn async error:', err);
         }
@@ -452,15 +463,25 @@ interviewRouter.post(
     try {
       const sessionId = req.params.id as string;
 
-      let body: z.infer<typeof ConcludeSessionSchema>;
-      try {
-        body = ConcludeSessionSchema.parse(req.body);
-      } catch {
-        throw new AppError(422, 'overallScore (0-100) is required', 'MISSING_SCORE');
+      const state = await sessionContextService.getState(sessionId);
+
+      // Ownership check
+      if (state) {
+        if (state.student_id !== req.user!.id) {
+          throw new AppError(403, 'Access denied', 'FORBIDDEN');
+        }
+      } else {
+        // Redis expired — verify ownership from DB
+        const { rows: sessionRows } = await db.query<{ student_id: string }>(
+          'SELECT student_id FROM session.interview_sessions WHERE id = $1',
+          [sessionId],
+        );
+        if (sessionRows.length === 0) throw new AppError(404, 'Session not found', 'NOT_FOUND');
+        if (sessionRows[0].student_id !== req.user!.id) throw new AppError(403, 'Access denied', 'FORBIDDEN');
       }
 
-      const state = await sessionContextService.getState(sessionId);
-      const studentId = (state?.student_id ?? req.user!.id) as string;
+      const finalScore = state?.rolling_overall_score ?? 0;
+      const studentId = req.user!.id;
 
       // Flush final state to DB
       await db.query(
@@ -471,7 +492,7 @@ interviewRouter.post(
              interview_state = $2,
              updated_at    = now()
          WHERE id = $3`,
-        [body.overallScore, JSON.stringify(state ?? {}), sessionId],
+        [finalScore, JSON.stringify(state ?? {}), sessionId],
       );
 
       // Final transcript flush (non-blocking)
@@ -481,7 +502,7 @@ interviewRouter.post(
           .catch((err) => console.error('[interview.routes] conclude flushToDb error:', err));
       });
 
-      sendSuccess(res, { sessionId, status: 'completed', overallScore: body.overallScore });
+      sendSuccess(res, { sessionId, status: 'completed', overallScore: finalScore });
     } catch (err) {
       sendError(res, err);
     }
@@ -500,6 +521,10 @@ interviewRouter.get(
       if (!parsed.success) throw new AppError(400, 'Invalid query parameters', 'VALIDATION_ERROR');
       const query = parsed.data;
 
+      const cacheKey = `bank-fallback:${query.difficulty}:${query.domain ?? 'none'}`;
+      const cachedQ = await cache.get<object>(cacheKey);
+      if (cachedQ) { sendSuccess(res, cachedQ); return; }
+
       const { rows } = await db
         .query(
           `SELECT id, question_text, difficulty, category, domain
@@ -513,6 +538,7 @@ interviewRouter.get(
         .catch(() => ({ rows: [] as any[] }));
 
       if (rows.length > 0) {
+        await cache.set(cacheKey, rows[0], 60);
         sendSuccess(res, rows[0]);
         return;
       }
@@ -523,13 +549,15 @@ interviewRouter.get(
         ADVANCED: 'Describe a distributed consensus algorithm and its trade-offs.',
       };
 
-      sendSuccess(res, {
-        id: `fallback_${Date.now()}`,
+      const fallback = {
+        id: `fallback_${query.difficulty}_${query.domain ?? 'none'}`,
         question_text: staticFallbacks[query.difficulty],
         difficulty: query.difficulty,
         category: 'General',
         domain: query.domain ?? null,
-      });
+      };
+      await cache.set(cacheKey, fallback, 60);
+      sendSuccess(res, fallback);
     } catch (err) {
       sendError(res, err);
     }

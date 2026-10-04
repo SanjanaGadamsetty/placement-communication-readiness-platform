@@ -5,8 +5,11 @@ import { AppError } from '../../shared/errors/AppError';
 import { sendSuccess, sendError } from '../../shared/helpers/response';
 import { authenticate, AuthRequest } from '../../middleware/authenticate';
 import { requireRole } from '../../middleware/authorize';
+import { cache } from '../../services/cacheService';
 
 export const creditPoliciesRouter = Router();
+
+const POLICIES_CACHE_KEY = 'credit:policies:all';
 
 // GET /api/credit-policies
 creditPoliciesRouter.get(
@@ -15,12 +18,17 @@ creditPoliciesRouter.get(
   requireRole('PROGRAM_ADMIN', 'PLACEMENT_COORDINATOR'),
   async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
+      const cached = await cache.get<{ policies: unknown[] }>(POLICIES_CACHE_KEY);
+      if (cached) { sendSuccess(res, cached); return; }
+
       const { rows } = await db.query(
         `SELECT id, policy_key, scope_type, initial_credit_amount, consume_amount,
                 reward_ceiling, max_balance, self_practice_enabled, is_active, created_at
          FROM credit.credit_policies ORDER BY created_at ASC`
       );
-      sendSuccess(res, { policies: rows });
+      const data = { policies: rows };
+      await cache.set(POLICIES_CACHE_KEY, data, 300);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -65,6 +73,7 @@ creditPoliciesRouter.post(
          d.rewardCeiling, d.maxBalance ?? null, d.selfPracticeEnabled,
          d.conductedAttemptPolicy ? JSON.stringify(d.conductedAttemptPolicy) : null]
       );
+      await cache.del(POLICIES_CACHE_KEY);
       res.status(201);
       sendSuccess(res, { policy: rows[0] });
     } catch (err) {
@@ -99,6 +108,7 @@ creditPoliciesRouter.put(
          d.maxBalance ?? null, (d as Record<string, unknown>).isActive ?? null, id]
       );
       if (rows.length === 0) throw new AppError(404, 'Policy not found', 'NOT_FOUND');
+      await cache.del(POLICIES_CACHE_KEY);
       sendSuccess(res, { policy: rows[0] });
     } catch (err) {
       sendError(res, err);

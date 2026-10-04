@@ -2,6 +2,7 @@ export type UserRole =
   | 'STUDENT'
   | 'FACULTY_MENTOR'
   | 'PROGRAM_ADMIN'
+  | 'SUPER_ADMIN'
   | 'TRAINER'
   | 'PLACEMENT_COORDINATOR';
 

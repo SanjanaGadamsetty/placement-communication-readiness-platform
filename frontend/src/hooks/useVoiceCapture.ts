@@ -1,93 +1,149 @@
 /**
- * useVoiceCapture — VAD-powered audio capture without SharedArrayBuffer.
+ * useVoiceCapture — Phase 1 Deepgram streaming path.
  *
- * Uses @ricky0123/vad-web which communicates via MessageChannel instead of
- * SharedArrayBuffer, so NO Cross-Origin-Embedder-Policy (COEP) headers are needed.
- * Do NOT add COEP/COOP headers to vite.config.ts or any server config.
+ * Uses @ricky0123/vad-web (MessageChannel, no SharedArrayBuffer) to detect
+ * speech start/end. On speech start, a MediaRecorder streams 250 ms audio
+ * chunks as binary WebSocket frames to Node.js → Deepgram live transcription.
+ * On speech end, signals `audio_end` so Deepgram can close the connection.
  *
- * When speech ends the VAD appends 200ms of silence before encoding so
- * Whisper does not cut off the final syllable.
+ * No COEP/COOP headers required — vad-web communicates via MessageChannel.
  */
-import { MicVAD, utils } from '@ricky0123/vad-web';
+import { MicVAD } from '@ricky0123/vad-web';
 import { useCallback, useEffect, useRef } from 'react';
 
+export interface TurnMeta {
+  questionText: string;
+  difficulty: string;
+  turnNumber: number;
+  studentId: string;
+  domain?: string;
+}
+
 export interface UseVoiceCaptureOptions {
-  /** Called with a WAV Blob (16 kHz mono) when a speech segment ends. */
-  onSpeechEnd: (audioBlob: Blob) => void;
-  /** Optional: called when VAD detects speech start. */
+  wsRef: React.MutableRefObject<WebSocket | null>;
+  turnMeta: TurnMeta;
   onSpeechStart?: () => void;
-  /**
-   * Probability threshold above which a frame is considered speech.
-   * Default: 0.9 (conservative — fewer false positives).
-   */
+  onSpeechEnd?: () => void;
   positiveSpeechThreshold?: number;
-  /**
-   * Probability threshold below which a frame is considered silence.
-   * Default: 0.75.
-   */
   negativeSpeechThreshold?: number;
-  /**
-   * Minimum consecutive speech frames before firing onSpeechStart.
-   * Default: 5 (~160ms at 16 kHz / 512 frame size).
-   */
   minSpeechFrames?: number;
+  redemptionFrames?: number;
 }
 
 export interface UseVoiceCaptureReturn {
-  /** Start VAD and microphone capture. Idempotent if already started. */
   start: () => Promise<void>;
-  /** Stop VAD and release microphone. */
   stop: () => void;
 }
 
 export function useVoiceCapture({
-  onSpeechEnd,
+  wsRef,
+  turnMeta,
   onSpeechStart,
-  positiveSpeechThreshold = 0.9,
-  negativeSpeechThreshold = 0.75,
+  onSpeechEnd,
+  positiveSpeechThreshold = 0.6,
+  negativeSpeechThreshold = 0.35,
   minSpeechFrames = 5,
+  redemptionFrames = 5,
 }: UseVoiceCaptureOptions): UseVoiceCaptureReturn {
   const vadRef = useRef<MicVAD | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
   const listeningRef = useRef(false);
+  const turnMetaRef = useRef(turnMeta);
+  turnMetaRef.current = turnMeta;
+
+  const stop = useCallback(() => {
+    listeningRef.current = false;
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      recorderRef.current.stop();
+    }
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    vadRef.current?.destroy();
+    vadRef.current = null;
+    recorderRef.current = null;
+    micStreamRef.current = null;
+  }, []);
 
   const start = useCallback(async () => {
     if (listeningRef.current) return;
     listeningRef.current = true;
 
+    // Separate mic stream for MediaRecorder (VAD creates its own internally)
+    let micStream: MediaStream;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (e) {
+      listeningRef.current = false;
+      throw e;
+    }
+    micStreamRef.current = micStream;
+
+    // Prefer WebM+Opus; fallback to whatever is supported
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : '';
+
+    const recorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size === 0) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      e.data.arrayBuffer().then((buf) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(buf);
+      }).catch(() => {});
+    };
+
+    recorder.onstop = () => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'audio_end' }));
+      }
+      onSpeechEnd?.();
+    };
+
     vadRef.current = await MicVAD.new({
       positiveSpeechThreshold,
       negativeSpeechThreshold,
       minSpeechFrames,
-      // redemptionFrames: number of consecutive non-speech frames before ending a segment
-      redemptionFrames: 8,
+      redemptionFrames,
 
-      onSpeechStart: () => onSpeechStart?.(),
+      onSpeechStart: () => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'audio_start',
+            ...turnMetaRef.current,
+          }));
+        }
+        if (recorderRef.current?.state === 'inactive') {
+          recorderRef.current.start(250);
+        }
+        onSpeechStart?.();
+      },
 
-      onSpeechEnd: (audio: Float32Array) => {
-        // Append 200ms silence tail so Whisper doesn't clip the final word
-        const sampleRate = 16000;
-        const silenceFrames = Math.floor(sampleRate * 0.2);
-        const padded = new Float32Array(audio.length + silenceFrames);
-        padded.set(audio);
-        // silenceFrames at end are already 0.0 (Float32Array default)
-
-        // Encode to WAV Blob (16 kHz mono) using the vad-web utility
-        const wavBuffer = utils.encodeWAV(padded);
-        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-        onSpeechEnd(blob);
+      onSpeechEnd: () => {
+        if (recorderRef.current?.state === 'recording') {
+          recorderRef.current.stop();
+          // audio_end is sent in recorder.onstop after the final chunk flushes
+        }
       },
     });
 
     vadRef.current.start();
-  }, [onSpeechEnd, onSpeechStart, positiveSpeechThreshold, negativeSpeechThreshold, minSpeechFrames]);
+  }, [
+    wsRef,
+    onSpeechStart,
+    onSpeechEnd,
+    positiveSpeechThreshold,
+    negativeSpeechThreshold,
+    minSpeechFrames,
+    redemptionFrames,
+  ]);
 
-  const stop = useCallback(() => {
-    vadRef.current?.destroy();
-    vadRef.current = null;
-    listeningRef.current = false;
-  }, []);
-
-  // Cleanup on unmount
   useEffect(() => () => stop(), [stop]);
 
   return { start, stop };

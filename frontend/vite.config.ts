@@ -21,6 +21,12 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      // WebSocket proxy for Deepgram streaming interview path
+      '/interview': {
+        target: 'ws://localhost:5000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

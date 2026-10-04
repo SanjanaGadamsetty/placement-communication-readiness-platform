@@ -14,6 +14,7 @@ class BaseProvider(ABC):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> str: ...
 
     @abstractmethod
@@ -22,6 +23,7 @@ class BaseProvider(ABC):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> Iterator[str]: ...
 
 
@@ -43,6 +45,7 @@ class OpenAICompatibleProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> str:
         kwargs: dict[str, Any] = dict(
             model=self._model,
@@ -51,6 +54,8 @@ class OpenAICompatibleProvider(BaseProvider):
         )
         if response_format:
             kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         resp = self._client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
 
@@ -59,6 +64,7 @@ class OpenAICompatibleProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> Iterator[str]:
         kwargs: dict[str, Any] = dict(
             model=self._model,
@@ -68,6 +74,8 @@ class OpenAICompatibleProvider(BaseProvider):
         )
         if response_format:
             kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         stream = self._client.chat.completions.create(**kwargs)
         for chunk in stream:
             delta = chunk.choices[0].delta.content
@@ -88,10 +96,11 @@ class AnthropicProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> str:
         resp = self._client.messages.create(
             model=self._model,
-            max_tokens=2048,
+            max_tokens=max_tokens or 2048,
             temperature=temperature,
             messages=messages,
         )
@@ -102,10 +111,11 @@ class AnthropicProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> Iterator[str]:
         with self._client.messages.stream(
             model=self._model,
-            max_tokens=2048,
+            max_tokens=max_tokens or 2048,
             temperature=temperature,
             messages=messages,
         ) as stream:
@@ -145,6 +155,7 @@ class MockProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> str:
         content = messages[-1].get("content", "").lower()
         if "interview question" in content or "generate" in content:
@@ -158,6 +169,7 @@ class MockProvider(BaseProvider):
         messages: list[dict[str, str]],
         response_format: dict[str, str] | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> Iterator[str]:
         full = self.chat_complete(messages, response_format, temperature)
         chunk_size = 12

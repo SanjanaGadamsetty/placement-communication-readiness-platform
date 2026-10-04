@@ -29,7 +29,7 @@ Do **not** start on Module 1 source code until Step 0 and the shared infrastruct
 - All items listed in Section 1
 - Migrations 001–030
 - `authenticate` middleware with **token_version DB check** on every request
-- Five roles only: `STUDENT`, `FACULTY_MENTOR`, `PROGRAM_ADMIN`, `TRAINER`, `PLACEMENT_COORDINATOR`
+- Seven roles: `STUDENT`, `FACULTY_MENTOR`, `COLLEGE_ADMIN`, `PROGRAM_ADMIN`, `TRAINER`, `PLACEMENT_COORDINATOR`, `SUPER_ADMIN`
 - EventEmitter handlers for `USER_REGISTERED`, `MENTOR_VERIFIED`, `CHECKLIST_ITEM_TOGGLED`
 - `LocalStorageClient` stub for resume uploads (filesystem only)
 
@@ -38,7 +38,7 @@ Do **not** start on Module 1 source code until Step 0 and the shared infrastruct
 - External student registration (`register-external`) — removed per D-22
 - Redis session cache — post-MVP
 - RabbitMQ / Bull queue — post-MVP (EventEmitter is MVP)
-- `SUPER_ADMIN` role — permanently banned; do not add
+- `SUPER_ADMIN` role — platform-wide admin (exists in codebase, used by all admin routes)
 - Soft-delete (logical deletion) — post-MVP
 - Pagination on org list endpoints — defer unless list > 200 rows
 - Prometheus metrics endpoints — post-MVP
@@ -68,7 +68,7 @@ The following routes are banned per decision D-22 (no email verification in this
 
 ### 3.3 Fix UserRole type
 - [ ] Open `src/types/index.ts`
-- [ ] Remove `'SUPER_ADMIN'` from the `UserRole` union/enum
+- [x] `SUPER_ADMIN` IS in `UserRole` union — required for admin routes
 - [ ] Confirm the five allowed values: `'STUDENT' | 'FACULTY_MENTOR' | 'PROGRAM_ADMIN' | 'TRAINER' | 'PLACEMENT_COORDINATOR'`
 
 ### 3.4 Rename existing route prefixes
@@ -703,7 +703,7 @@ Current problems:
 - `requireActiveTrainerTenure` queries `college.trainer_tenures` — change to `org.trainer_subdivision_assignments`
 - `requireStudentSelfOrStaff` queries `college.students` — change to `org.students`
 
-- [ ] Remove all `SUPER_ADMIN` references from `rbac.ts`
+- [x] `SUPER_ADMIN` references kept in `authorize.ts` — required
 - [ ] Update schema references: `college.students` → `org.students`
 - [ ] Update schema references: `college.trainer_tenures` → `org.trainer_subdivision_assignments`
 - [ ] `requireRole(...roles)` accepts any subset of the 5 valid roles
@@ -774,7 +774,7 @@ Work in this exact order. Do not move to the next step until the current one pas
 2. - [ ] **Create `src/shared/` folder structure** — all subfolders
 3. - [ ] **Build `AppError`** — the error class used everywhere
 4. - [ ] **Build response helpers** — `sendSuccess`, `sendError`
-5. - [ ] **Build `UserRole` enum** (5 roles, no SUPER_ADMIN)
+5. - [x] **Build `UserRole` enum** (7 roles including SUPER_ADMIN, COLLEGE_ADMIN, PROGRAM_ADMIN)
 6. - [ ] **Build `AuthUser` interface** (with `tokenVersion`)
 7. - [ ] **Build `eventBus`** — EventEmitter singleton + event constants + payload types
 8. - [ ] **Confirm db import path** with team, re-export if needed from `src/shared/db/pool.ts`
@@ -788,7 +788,7 @@ Work in this exact order. Do not move to the next step until the current one pas
 
 ### Phase 3: Auth middleware (M2/M3/M4 need these to test their modules)
 14. - [ ] **Rewrite `authenticate` middleware** with token_version DB check
-15. - [ ] **Fix `requireRole` / `rbac.ts`** — remove SUPER_ADMIN, fix schema names
+15. - [x] **`requireRole` in `authorize.ts`** — supports all 7 roles including SUPER_ADMIN
 16. - [ ] **Build `validateBody` helper**
 17. - [ ] **Test middleware in isolation** — mock Express req/res, verify edge cases
 

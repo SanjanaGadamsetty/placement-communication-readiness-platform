@@ -1111,6 +1111,26 @@ class ApiClient {
   // ── SESSIONS ──────────────────────────────────────────────────────────────
 
   sessions = {
+    start: async (
+      resume: {
+        name: string;
+        experience_level: string;
+        skills: { languages: string[]; frameworks: string[]; databases: string[]; tools: string[] };
+        projects: Array<{ title: string; tech_stack: string[]; description: string }>;
+        summary: string;
+      },
+      options?: { maxTurns?: number; topics?: string[] }
+    ): Promise<{ sessionId: string; firstQuestion: string; curriculum: string[] }> => {
+      return await this.apiFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({
+          resume,
+          maxTurns: options?.maxTurns ?? 10,
+          topics: options?.topics,
+        }),
+      });
+    },
+
     bankFallback: async (
       difficulty: 'EASY' | 'MEDIUM' | 'ADVANCED',
       domain?: string
@@ -1139,6 +1159,9 @@ class ApiClient {
       strengths: string;
       weaknesses: string;
       nextDifficulty: string;
+      nextQuestionText?: string;
+      conversationalResponse?: string;
+      contextSummary?: string;
       audioMetrics: {
         paceWpm: number;
         fillerCount: number;
@@ -1148,7 +1171,7 @@ class ApiClient {
     }> => {
       const formData = new FormData();
       formData.append('audio', audioBlob, 'response.wav');
-      formData.append('metadata', JSON.stringify(metadata));
+      formData.append('metadata', JSON.stringify({ sessionId, ...metadata }));
       return await this.apiFetch(`/api/sessions/${sessionId}/turns`, {
         method: 'POST',
         body: formData,

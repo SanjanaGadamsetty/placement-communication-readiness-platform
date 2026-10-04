@@ -34,6 +34,21 @@ interface InterviewSessionState {
   liveTranscript: string;
 }
 
+export interface WsTurnResultData {
+  transcript: string;
+  technicalScore: number;
+  communicationScore: number;
+  overallScore: number;
+  feedback: string;
+  strengths: string;
+  weaknesses: string;
+  nextDifficulty: string;
+  nextQuestionText: string;
+  contextSummary: string;
+  audioMetrics: { paceWpm: number; fillerCount: number; fluencyScore: number; clarityScore: number };
+  conversationalResponse: string;
+}
+
 interface AppContextType {
   isAuthenticated: boolean;
   currentUser: AuthUser | null;
@@ -68,6 +83,7 @@ interface AppContextType {
   verifyCriteriaTask: (taskId: string) => Promise<void>;
   uploadResumeData: (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume) => Promise<ParsedResume>;
   updateCodingHandles: (handles: Partial<CodingHandles>) => Promise<void>;
+  applyWsTurnResult: (data: WsTurnResultData, turnNumber: number) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -207,15 +223,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const startInterview = async (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' = 'MOCK_INTERVIEW') => {
     setActiveView(type === 'MOCK_INTERVIEW' ? 'INTERVIEW_ROOM' : 'LISTENING_ROOM');
 
+    if (type !== 'MOCK_INTERVIEW') {
+      // Listening comprehension path unchanged
+      setInterviewState({
+        isActive: true,
+        sessionId: `ses_${Date.now()}`,
+        type,
+        turnIndex: 0,
+        currentDifficulty: 'EASY',
+        questions: MOCK_INTERVIEW_QUESTIONS,
+        tabSwitches: 0,
+        isFlagged: false,
+        orbState: 'SPEAKING',
+        liveTranscript: ''
+      });
+      return;
+    }
+
+    const backendResume = {
+      name: student.name || '',
+      experience_level: 'fresher',
+      skills: {
+        languages: student.resume?.skills.languages ?? [],
+        frameworks: student.resume?.skills.frameworks ?? [],
+        databases: student.resume?.skills.databases ?? [],
+        tools: student.resume?.skills.tools ?? [],
+      },
+      projects: (student.resume?.projects ?? []).map(p => ({
+        title: p.title,
+        tech_stack: p.techStack ?? [],
+        description: p.description ?? '',
+      })),
+      summary: student.resume?.summary ?? '',
+    };
+
     try {
-      const data = await api.interview.start(student.id || 'stu-21cs1084', type);
+      const data = await api.sessions.start(backendResume, { maxTurns: 10 });
+      const firstQ: QuestionTurn = {
+        id: `q_1_${Date.now()}`,
+        questionNumber: 1,
+        questionText: data.firstQuestion,
+        difficulty: 'EASY',
+        category: 'Introduction',
+      };
       setInterviewState({
         isActive: true,
         sessionId: data.sessionId,
         type,
         turnIndex: 0,
-        currentDifficulty: data.firstQuestion.difficulty,
-        questions: [data.firstQuestion],
+        currentDifficulty: 'EASY',
+        questions: [firstQ],
         tabSwitches: 0,
         isFlagged: false,
         orbState: 'SPEAKING',
@@ -322,14 +379,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const sessId = interviewState.sessionId || `ses_${Date.now()}`;
     try {
       const data = await api.sessions.submitTurn(sessId, audioBlob, {
-        studentId: student.id || 'stu-21cs1084',
+        studentId: currentUser?.id || student.id || '',
         questionText,
         difficulty,
         turnNumber,
         domain: student.department || 'CSE',
       });
 
-      const isCompleted = turnNumber >= 3;
+      const isCompleted = turnNumber >= (interviewState.questions.length);
       if (isCompleted) {
         const report: DiagnosticReport = {
           id: `rep_${Date.now().toString().slice(-4)}`,
@@ -355,12 +412,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
         setActiveView('REPORT_VIEW');
       } else {
-        const nextQ = {
+        const nextQ: QuestionTurn = {
           id: `q_${turnNumber + 1}_${Date.now()}`,
           questionNumber: turnNumber + 1,
-          questionText: 'Please elaborate on the scalability aspects of your previous answer.',
-          difficulty: (data.nextDifficulty || 'MEDIUM') as Difficulty,
-          category: 'Architecture',
+          questionText: data.nextQuestionText || 'Thank you for your answer. What challenges have you faced?',
+          difficulty: (data.nextDifficulty || 'EASY') as Difficulty,
+          category: 'Technical',
+          conversationalResponse: data.conversationalResponse || undefined,
         };
         setInterviewState(prev => {
           const updated = [...prev.questions];
@@ -389,6 +447,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[AppContext] Audio submit error, falling back to text:', e);
       await submitAnswer(questionText);
     }
+  };
+
+  const applyWsTurnResult = (data: WsTurnResultData, turnNumber: number) => {
+    const isCompleted = turnNumber >= (interviewState.questions.length);
+    if (isCompleted) {
+      const report: DiagnosticReport = {
+        id: `rep_${Date.now().toString().slice(-4)}`,
+        date: new Date().toISOString().split('T')[0],
+        sessionType: interviewState.type,
+        overallScore: data.overallScore,
+        technicalScore: data.technicalScore,
+        communicationScore: data.communicationScore,
+        averageWpm: data.audioMetrics?.paceWpm || 120,
+        totalFillerWords: data.audioMetrics?.fillerCount || 0,
+        fillerWordBreakdown: {},
+        skillBreakdown: [
+          { skill: 'Technical Knowledge', score: data.technicalScore, status: data.technicalScore >= 75 ? 'STRONG' : 'NEEDS_WORK', recommendation: data.feedback },
+          { skill: 'Communication Fluency', score: Math.round(data.audioMetrics?.fluencyScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.strengths },
+          { skill: 'Speech Clarity', score: Math.round(data.audioMetrics?.clarityScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.weaknesses },
+        ],
+        actionableNextSteps: [data.feedback, data.strengths, data.weaknesses].filter(Boolean),
+        tabSwitches: interviewState.tabSwitches,
+        isFlagged: interviewState.isFlagged,
+      };
+      setLatestReport(report);
+      setStudent(prev => ({ ...prev, recentReports: [report, ...prev.recentReports] }));
+      setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
+      setActiveView('REPORT_VIEW');
+      return;
+    }
+
+    const nextQ: QuestionTurn = {
+      id: `q_${turnNumber + 1}_${Date.now()}`,
+      questionNumber: turnNumber + 1,
+      questionText: data.nextQuestionText || 'Thank you. Can you tell me more about your technical background?',
+      difficulty: (data.nextDifficulty || 'EASY') as Difficulty,
+      category: 'Technical',
+      conversationalResponse: data.conversationalResponse || undefined,
+    };
+
+    setInterviewState(prev => {
+      const updated = [...prev.questions];
+      if (updated[prev.turnIndex]) {
+        updated[prev.turnIndex] = {
+          ...updated[prev.turnIndex],
+          studentAnswer: data.transcript,
+          technicalScore: data.technicalScore,
+          communicationScore: data.communicationScore,
+          wpm: data.audioMetrics?.paceWpm || 120,
+          fillerWords: data.audioMetrics?.fillerCount || 0,
+          feedback: data.feedback,
+          strengths: data.strengths,
+          weaknesses: data.weaknesses,
+        };
+      }
+      return {
+        ...prev,
+        turnIndex: prev.turnIndex + 1,
+        currentDifficulty: (data.nextDifficulty || 'MEDIUM') as Difficulty,
+        questions: [...updated, nextQ],
+        orbState: 'SPEAKING',
+        liveTranscript: '',
+      };
+    });
   };
 
   const endInterview = async () => {
@@ -732,7 +854,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       toggleCriteriaTask,
       verifyCriteriaTask,
       uploadResumeData,
-      updateCodingHandles
+      updateCodingHandles,
+      applyWsTurnResult,
     }}>
       {children}
     </AppContext.Provider>

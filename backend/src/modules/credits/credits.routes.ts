@@ -6,6 +6,7 @@ import { sendSuccess, sendError } from '../../shared/helpers/response';
 import { authenticate, AuthRequest } from '../../middleware/authenticate';
 import { requireRole } from '../../middleware/authorize';
 import { CreditService } from './credits.service';
+import { cache } from '../../services/cacheService';
 
 export const creditsRouter = Router();
 
@@ -19,7 +20,6 @@ creditsRouter.get(
       const role = req.user!.role;
       const userId = req.user!.id;
 
-      // Students can only see their own balance
       if (role === 'STUDENT') {
         const { rows } = await db.query(
           'SELECT id FROM org.students WHERE id = $1 AND user_id = $2',
@@ -27,6 +27,10 @@ creditsRouter.get(
         );
         if (rows.length === 0) throw new AppError(403, 'Access denied', 'FORBIDDEN');
       }
+
+      const key = `credits:balance:${studentId}`;
+      const cached = await cache.get<object>(key);
+      if (cached) { sendSuccess(res, cached); return; }
 
       const { rows } = await db.query(
         'SELECT id, balance, created_at, updated_at FROM credit.credit_accounts WHERE student_id = $1',
@@ -43,14 +47,16 @@ creditsRouter.get(
         [studentId]
       );
 
-      sendSuccess(res, {
+      const data = {
         studentId,
         balance: Number(rows[0].balance),
         accountId: rows[0].id,
         updatedAt: rows[0].updated_at,
         totalEarned: Number(totals[0].total_earned),
         totalConsumed: Number(totals[0].total_consumed),
-      });
+      };
+      await cache.set(key, data, 30);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -79,6 +85,10 @@ creditsRouter.get(
       const limit = Math.min(100, parseInt(req.query.limit as string || '20', 10));
       const offset = (page - 1) * limit;
 
+      const key = `credits:txns:${studentId}:${page}:${limit}`;
+      const cached = await cache.get<object>(key);
+      if (cached) { sendSuccess(res, cached); return; }
+
       const { rows } = await db.query(
         `SELECT id, transaction_type, amount, balance_after, reference_type, reference_id,
                 metadata, created_at
@@ -94,10 +104,12 @@ creditsRouter.get(
         [studentId]
       );
 
-      sendSuccess(res, {
+      const data = {
         transactions: rows,
         pagination: { total: parseInt(countRows[0].total, 10), page, limit },
-      });
+      };
+      await cache.set(key, data, 60);
+      sendSuccess(res, data);
     } catch (err) {
       sendError(res, err);
     }
@@ -123,15 +135,19 @@ creditsRouter.post(
       const { studentId, amount, reason, referenceId } = parsed.data;
       const refId = referenceId ?? req.user!.id;
 
+      let result: { newBalance: number; transactionId: string };
       if (amount > 0) {
-        const result = await CreditService.earn(studentId, amount, `ADJUST:${reason}`, refId);
-        sendSuccess(res, { newBalance: result.newBalance, transactionId: result.transactionId });
+        result = await CreditService.earn(studentId, amount, `ADJUST:${reason}`, refId);
       } else if (amount < 0) {
-        const result = await CreditService.consume(studentId, Math.abs(amount), `ADJUST:${reason}`, refId);
-        sendSuccess(res, { newBalance: result.newBalance, transactionId: result.transactionId });
+        result = await CreditService.consume(studentId, Math.abs(amount), `ADJUST:${reason}`, refId);
       } else {
         throw new AppError(422, 'Amount cannot be zero', 'VALIDATION_ERROR');
       }
+      await Promise.all([
+        cache.del(`credits:balance:${studentId}`),
+        cache.delPattern(`credits:txns:${studentId}:*`),
+      ]);
+      sendSuccess(res, { newBalance: result.newBalance, transactionId: result.transactionId });
     } catch (err) {
       sendError(res, err);
     }

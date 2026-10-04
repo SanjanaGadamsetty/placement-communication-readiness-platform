@@ -58,6 +58,7 @@ export interface QuestionTurn {
   questionText: string;
   difficulty: Difficulty;
   category?: string;
+  conversationalResponse?: string;
   studentAnswer?: string;
   technicalScore?: number;
   communicationScore?: number;

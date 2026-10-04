@@ -113,8 +113,9 @@ class LLMClient:
             for p in resume.projects
         ) or "  None listed"
 
+        # Fix 8: trim to last 5 summaries (was 10)
         stc_block = (
-            "\n".join(f"Turn {i+1}: {s}" for i, s in enumerate(meta.short_term_context[-10:]))
+            "\n".join(f"Turn {i+1}: {s}" for i, s in enumerate(meta.short_term_context[-5:]))
             if meta.short_term_context
             else "No prior turns yet."
         )
@@ -137,10 +138,32 @@ class LLMClient:
             else "  (none yet)"
         )
 
-        system_prompt = f"""You are an elite AI Technical Interviewer for a campus placement program.
+        # Fix 10: static behavioral rules + output schema → system message for prefix caching
+        static_system = """/no_think
+You are an elite AI Technical Interviewer for a campus placement program.
 In a SINGLE response you must:
   1. Evaluate the candidate's last answer against the rubric.
   2. Generate the next interview question with its rubric.
+
+== CLARIFICATION RULE (highest priority) ==
+If CANDIDATE'S TRANSCRIPT is a clarification or repeat request — examples: "can you repeat that",
+"i didn't understand", "could you ask that again", "what did you say", "sorry?", "huh?",
+"i couldn't hear", "please repeat", "say that again", or any similar phrasing asking to
+re-hear the question — do NOT evaluate, do NOT score, do NOT generate a new question.
+Instead return ONLY:
+{
+  "is_clarification": true,
+  "conversational_response": "<repeat the current question verbatim, prefixed with: Sure! Here is the question again:>",
+  "next_question_text": "",
+  "technical_score": 0,
+  "feedback": "",
+  "strengths": "",
+  "weaknesses": "",
+  "context_summary": "",
+  "update_state": {"mark_topic_completed": null, "add_to_do_not_ask": null},
+  "rubric_for_next_question": {},
+  "next_recommended_difficulty": "EASY"
+}
 
 == BEHAVIORAL RULES ==
 - Stay strictly on the active_topic until it is marked complete.
@@ -151,11 +174,40 @@ In a SINGLE response you must:
   and advance to the next in topic_curriculum.
 - context_summary is stored internally, NOT shown to the candidate — capture key claims,
   technologies named, and examples given.
-- technical_score strictly follows rubric scoring_bands. Vague answers with no examples ≤ 4.
-- conversational_response is spoken aloud — natural, ≤ 3 sentences, end with the question.
+- technical_score strictly follows rubric scoring_bands. Vague answers with no examples <= 4.
+- conversational_response is spoken aloud — natural, <= 3 sentences, end with the question.
 - next_question_text is the clean question only (no framing), for DB storage.
 
-== CANDIDATE PROFILE ==
+Return ONLY valid JSON — no prose outside the JSON:
+{
+  "is_clarification": false,
+  "update_state": {
+    "mark_topic_completed": null,
+    "add_to_do_not_ask": "exact question asked this turn"
+  },
+  "conversational_response": "natural spoken response + next question (<=3 sentences)",
+  "next_question_text": "clean question text only",
+  "rubric_for_next_question": {
+    "key_concepts": ["...", "..."],
+    "strong_indicators": ["...", "..."],
+    "weak_indicators": ["...", "..."],
+    "scoring_bands": {
+      "high": "8-10: ...",
+      "mid": "5-7: ...",
+      "low": "0-4: ..."
+    },
+    "follow_up_probes": ["If they miss X: '...'"]
+  },
+  "context_summary": "2-3 line digest of what candidate said",
+  "technical_score": 0.0,
+  "feedback": "...",
+  "strengths": "...",
+  "weaknesses": "...",
+  "next_recommended_difficulty": "EASY|MEDIUM|ADVANCED"
+}"""
+
+        # Fix 10: dynamic per-turn content → user message
+        dynamic_user = f"""== CANDIDATE PROFILE ==
 Name: {resume.name or 'Candidate'}
 Experience: {resume.experience_level}
 Skills: {skills_str}
@@ -174,7 +226,7 @@ Performance trend: {state.candidate_performance_trend}
 == DO NOT ASK OR REPEAT ==
 {dna_list}
 
-== SHORT-TERM CONTEXT (last 10 turn summaries) ==
+== SHORT-TERM CONTEXT (last 5 turn summaries) ==
 {stc_block}
 
 == LONG-TERM SEMANTIC RETRIEVAL ==
@@ -187,37 +239,12 @@ Performance trend: {state.candidate_performance_trend}
 [{meta.difficulty}] {meta.question_text}
 
 == CANDIDATE'S TRANSCRIPT ==
-{transcript or "(no speech detected)"}
+{transcript or "(no speech detected)"}"""
 
-Return ONLY valid JSON — no prose outside the JSON:
-{{
-  "analysis": "brief internal evaluation reasoning",
-  "update_state": {{
-    "mark_topic_completed": null,
-    "add_to_do_not_ask": "exact question asked this turn"
-  }},
-  "conversational_response": "natural spoken response + next question (≤3 sentences)",
-  "next_question_text": "clean question text only",
-  "rubric_for_next_question": {{
-    "key_concepts": ["...", "..."],
-    "strong_indicators": ["...", "..."],
-    "weak_indicators": ["...", "..."],
-    "scoring_bands": {{
-      "high": "8-10: ...",
-      "mid": "5-7: ...",
-      "low": "0-4: ..."
-    }},
-    "follow_up_probes": ["If they miss X: '...'"]
-  }},
-  "context_summary": "2-3 line digest of what candidate said",
-  "technical_score": 0.0,
-  "feedback": "...",
-  "strengths": "...",
-  "weaknesses": "...",
-  "next_recommended_difficulty": "EASY|MEDIUM|ADVANCED"
-}}"""
-
-        return [{"role": "user", "content": system_prompt}]
+        return [
+            {"role": "system", "content": static_system},
+            {"role": "user", "content": dynamic_user},
+        ]
 
     def conduct_interview(
         self,
@@ -226,9 +253,11 @@ Return ONLY valid JSON — no prose outside the JSON:
         long_term_chunks: list[str],
     ) -> dict[str, Any]:
         messages = self._build_interview_messages(transcript, meta, long_term_chunks)
+        # Fix 3: max_tokens cap on sync path
         raw = self._provider.chat_complete(
             messages=messages,
             response_format={"type": "json_object"},
+            max_tokens=1000,
         )
         return json.loads(raw)
 
@@ -247,7 +276,10 @@ Return ONLY valid JSON — no prose outside the JSON:
             try:
                 for chunk in self._provider.chat_complete_stream(
                     messages=messages,
-                    response_format={"type": "json_object"},
+                    # Fix 3: lower temperature for structured JSON, cap tokens
+                    # Fix 4: no response_format on streaming path (removes constrained-decoding overhead)
+                    temperature=0.2,
+                    max_tokens=900,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
             except Exception as exc:

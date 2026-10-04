@@ -21,10 +21,10 @@ export function registerM4EventHandlers(): void {
       // Fetch earn amount from global policy
       const { db } = await import('../../shared/db/pool');
       const { rows: policies } = await db.query(
-        `SELECT consume_amount FROM credit.credit_policies
+        `SELECT earn_amount FROM credit.credit_policies
          WHERE scope_type = 'GLOBAL' AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`
       );
-      const earnAmount = policies.length > 0 ? Number(policies[0].consume_amount) : 10;
+      const earnAmount = policies.length > 0 ? Number(policies[0].earn_amount) : 10;
 
       await CreditService.earn(
         payload.studentId,

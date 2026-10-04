@@ -55,39 +55,41 @@ attemptsRouter.post(
         throw new AppError(409, 'You already have an active attempt for this assessment', 'ATTEMPT_IN_PROGRESS');
       }
 
-      // Step 1: Consume credits BEFORE creating attempt.
-      // Cost comes from the active global credit policy (consume_amount). Defaults to 10.
+      // Consume credits first (idempotent — safe to retry on transient failure)
       const { rows: policyRows } = await db.query(
         `SELECT consume_amount FROM credit.credit_policies
          WHERE scope_type = 'GLOBAL' AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`
       );
       const creditCost = policyRows.length > 0 ? Number(policyRows[0].consume_amount) : 10;
       const { newBalance } = await CreditService.consume(
-        student_id,
-        creditCost,
-        'ASSESSMENT_START',
-        assessmentId
+        student_id, creditCost, 'ASSESSMENT_START', assessmentId
       );
 
-      // Step 2: Create attempt
+      // Create attempt — compensate credits on any failure (partial-unique index guards race)
       const assessment = assessments[0];
-      const { rows: attempt } = await db.query(
-        `INSERT INTO assessment.assessment_attempts
-           (assessment_id, student_id, interview_type, program_id, batch_id, subdivision_id,
-            assessment_version, scoring_version, credit_policy_snapshot, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, '1.0', $8, 'IN_PROGRESS')
-         RETURNING id, assessment_id, student_id, status, started_at`,
-        [
-          assessmentId,
-          student_id,
-          assessment.interview_type,
-          program_id,
-          batch_id,
-          subdivision_id,
-          assessment.version,
-          JSON.stringify({ credit_cost: creditCost }),
-        ]
-      );
+      let attempt: { id: string; status: string }[];
+      try {
+        const { rows } = await db.query(
+          `INSERT INTO assessment.assessment_attempts
+             (assessment_id, student_id, interview_type, program_id, batch_id, subdivision_id,
+              assessment_version, scoring_version, credit_policy_snapshot, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, '1.0', $8, 'IN_PROGRESS')
+           RETURNING id, assessment_id, student_id, status, started_at`,
+          [assessmentId, student_id, assessment.interview_type, program_id, batch_id,
+           subdivision_id, assessment.version, JSON.stringify({ credit_cost: creditCost })]
+        );
+        attempt = rows;
+      } catch (insertErr: unknown) {
+        // Refund consumed credits before propagating the error
+        await CreditService.earn(student_id, creditCost, 'ASSESSMENT_START_REFUND', assessmentId)
+          .catch(refundErr =>
+            console.error('[attempts] credit refund failed:', (refundErr as Error).message)
+          );
+        if ((insertErr as { code?: string }).code === '23505') {
+          throw new AppError(409, 'You already have an active attempt for this assessment', 'ATTEMPT_IN_PROGRESS');
+        }
+        throw insertErr as Error;
+      }
 
       sendSuccess(res, {
         attemptId: attempt[0].id,

@@ -26,7 +26,7 @@ export const requireStudentSelfOrStaff = (
   next: NextFunction
 ): void => {
   const user = req.user!;
-  const staffRoles: UserRole[] = ['FACULTY_MENTOR', 'PROGRAM_ADMIN', 'TRAINER', 'PLACEMENT_COORDINATOR'];
+  const staffRoles: UserRole[] = ['FACULTY_MENTOR', 'PROGRAM_ADMIN', 'TRAINER', 'PLACEMENT_COORDINATOR', 'SUPER_ADMIN'];
 
   if (staffRoles.includes(user.role)) { next(); return; }
 
