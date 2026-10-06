@@ -1,25 +1,85 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { 
   UserRole, 
   StudentProfile, 
   DiagnosticReport, 
   TrainerTenure, 
   InterviewAssignment, 
+  AssignmentSubmission, 
   QuestionTurn, 
-  Difficulty,
-  ParsedResume,
-  AuthUser,
-  CodingHandles 
+  Difficulty, 
+  ParsedResume, 
+  AuthUser, 
+  CodingHandles, 
+  DynamicProgram, 
+  AppNotification, 
+  AdminPermission, 
+  ImprovementChecklistItem, 
+  College
 } from '../types';
 import { 
-  DEFAULT_CLEAN_STUDENT,
+  DEFAULT_CLEAN_STUDENT, 
   INITIAL_STUDENT_PROFILE, 
-  INITIAL_CRITERIA_TASKS,
+  INITIAL_CRITERIA_TASKS, 
   MOCK_INTERVIEW_QUESTIONS, 
   MOCK_TRAINER_TENURES, 
-  MOCK_ASSIGNMENTS 
+  MOCK_ASSIGNMENTS, 
+  MOCK_MENTEES_LIST
 } from '../data/mockData';
 import { api } from '../services/api';
+import { logger } from '../services/logger';
+import { closeTopModal } from '../utils/modalManager';
+
+export type AppView = 
+  | 'DASHBOARD' 
+  | 'INTERVIEW_ROOM' 
+  | 'LISTENING_ROOM' 
+  | 'REPORT_VIEW' 
+  | 'PROFILE' 
+  | 'PROGRAM_DETAIL' 
+  | 'PROGRAM_LOGS'
+  | 'ASSESSMENT_ACTIVITY'
+  | 'ASSESSMENT_SUBMISSIONS'
+  | 'ACTIVATE_INVITE';
+
+export const VIEW_TO_HASH: Record<AppView, string> = {
+  DASHBOARD: '#/dashboard',
+  INTERVIEW_ROOM: '#/interview',
+  LISTENING_ROOM: '#/listening',
+  REPORT_VIEW: '#/report',
+  PROFILE: '#/profile',
+  PROGRAM_DETAIL: '#/program-detail',
+  PROGRAM_LOGS: '#/program-logs',
+  ASSESSMENT_ACTIVITY: '#/assessment-activity',
+  ASSESSMENT_SUBMISSIONS: '#/assessment-submissions',
+  ACTIVATE_INVITE: '#/activate'
+};
+
+export const HASH_TO_VIEW: Record<string, AppView> = {
+  '#/dashboard': 'DASHBOARD',
+  '#/interview': 'INTERVIEW_ROOM',
+  '#/listening': 'LISTENING_ROOM',
+  '#/report': 'REPORT_VIEW',
+  '#/profile': 'PROFILE',
+  '#/program-detail': 'PROGRAM_DETAIL',
+  '#/program-logs': 'PROGRAM_LOGS',
+  '#/assessment-activity': 'ASSESSMENT_ACTIVITY',
+  '#/assessment-submissions': 'ASSESSMENT_SUBMISSIONS',
+  '#/activate': 'ACTIVATE_INVITE',
+  '#dashboard': 'DASHBOARD',
+  '#interview': 'INTERVIEW_ROOM',
+  '#listening': 'LISTENING_ROOM',
+  '#report': 'REPORT_VIEW',
+  '#profile': 'PROFILE',
+  '#program-detail': 'PROGRAM_DETAIL',
+  '#program-logs': 'PROGRAM_LOGS',
+  '#assessment-activity': 'ASSESSMENT_ACTIVITY',
+  '#assessment-submissions': 'ASSESSMENT_SUBMISSIONS',
+  '#activate': 'ACTIVATE_INVITE',
+  '': 'DASHBOARD',
+  '#/': 'DASHBOARD',
+  '#': 'DASHBOARD'
+};
 
 interface InterviewSessionState {
   isActive: boolean;
@@ -30,60 +90,124 @@ interface InterviewSessionState {
   questions: QuestionTurn[];
   tabSwitches: number;
   isFlagged: boolean;
+  isDisqualified?: boolean;
+  disqualificationReason?: string;
   orbState: 'IDLE' | 'LISTENING' | 'THINKING' | 'SPEAKING';
   liveTranscript: string;
+  isCompletedAwaitingEvaluation?: boolean;
 }
 
-export interface WsTurnResultData {
-  transcript: string;
-  technicalScore: number;
-  communicationScore: number;
-  overallScore: number;
-  feedback: string;
-  strengths: string;
-  weaknesses: string;
-  nextDifficulty: string;
-  nextQuestionText: string;
-  contextSummary: string;
-  audioMetrics: { paceWpm: number; fillerCount: number; fluencyScore: number; clarityScore: number };
-  conversationalResponse: string;
+export interface ImpersonationSession {
+  originalUser: AuthUser;
+  originalRole: UserRole;
+  originalStudent?: StudentProfile;
+  targetUser?: AuthUser;
+  targetStudent?: StudentProfile;
 }
 
 interface AppContextType {
   isAuthenticated: boolean;
   currentUser: AuthUser | null;
   authModalOpen: boolean;
-  authModalMode: 'login' | 'register';
-  openAuthModal: (mode?: 'login' | 'register') => void;
+  authModalMode: 'login' | 'register' | 'register_institution';
+  openAuthModal: (mode?: 'login' | 'register' | 'register_institution') => void;
   closeAuthModal: () => void;
+  confirmSignOutOpen: boolean;
+  setConfirmSignOutOpen: (open: boolean) => void;
+  requestSignOut: () => void;
+  cancelSignOut: () => void;
+  confirmSignOut: () => void;
+  abandonWarningOpen: boolean;
+  requestExitAssessment: () => void;
+  cancelAbandonWarning: () => void;
+  confirmAbandonSession: () => void;
   loginUser: (email: string, password: string) => Promise<void>;
+  loginWithAuthUser: (authUser: AuthUser, token?: string) => void;
   registerUser: (data: any) => Promise<void>;
+  registerCandidate: (data: { name: string; email: string; password?: string }) => Promise<void>;
+  registerInstitution: (data: {
+    institutionName: string;
+    institutionCode: string;
+    campusCity: string;
+    adminName: string;
+    adminEmail: string;
+    password?: string;
+    contactPhone?: string;
+  }) => Promise<{ college: College; user: AuthUser; token: string }>;
+  completeInviteActivation: (token: string, password: string) => Promise<void>;
   registerExternalUser: (data: { name: string; email: string; password: string; department?: string; batchYear?: number }) => Promise<{ message: string; email: string; simulatedVerificationCode: string }>;
   verifyEmailAndLogin: (email: string, code: string) => Promise<void>;
   logout: () => void;
   activeRole: UserRole;
   setActiveRole: (role: UserRole) => void;
-  activeView: 'DASHBOARD' | 'INTERVIEW_ROOM' | 'LISTENING_ROOM' | 'REPORT_VIEW';
-  setActiveView: (view: 'DASHBOARD' | 'INTERVIEW_ROOM' | 'LISTENING_ROOM' | 'REPORT_VIEW') => void;
+  activeView: AppView;
+  setActiveView: (view: AppView, replace?: boolean) => void;
+  triggerBackNavigation: () => void;
   student: StudentProfile;
   setStudent: React.Dispatch<React.SetStateAction<StudentProfile>>;
   interviewState: InterviewSessionState;
   startInterview: (type?: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION') => Promise<void>;
   submitAnswer: (answerText: string) => Promise<void>;
-  submitAudioAnswer: (audioBlob: Blob, questionText: string, difficulty: string, turnNumber: number) => Promise<void>;
   endInterview: () => Promise<void>;
+  completeAssessmentAwaitingEvaluation: (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION', finalReport?: DiagnosticReport | null) => Promise<void>;
+  isEvaluationPending: boolean;
+  newReportNotification: { reportId: string; score: number; title: string; timestamp: number } | null;
+  dismissNewReportNotification: () => void;
   recordTabSwitch: () => Promise<void>;
   latestReport: DiagnosticReport | null;
   trainerTenures: TrainerTenure[];
   onboardTrainer: (trainer: Omit<TrainerTenure, 'id' | 'isActive'>) => Promise<void>;
   revokeTrainer: (id: string) => Promise<void>;
   assignments: InterviewAssignment[];
-  createAssignment: (assignment: Omit<InterviewAssignment, 'id'>) => Promise<void>;
+  createAssignment: (assignment: Partial<InterviewAssignment>) => Promise<InterviewAssignment>;
+  activeAssignment: InterviewAssignment | null;
+  startAssignedSession: (assignment: InterviewAssignment) => Promise<void>;
+  completeAssignmentSubmission: (assignmentId: string, score: number, sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH', status?: 'COMPLETED' | 'FLAGGED' | 'DISQUALIFIED', reason?: string) => Promise<void>;
+  isAssignmentDisqualified: (assignmentId: string) => boolean;
+  disqualifyAssignment: (assignmentId: string, reason?: string) => Promise<void>;
+  terminateDisqualifiedSession: (assignmentId?: string) => Promise<void>;
+  disqualifiedAssignmentIds: string[];
+  sessionCoinAtStake: boolean;
+  restoreSessionCoin: () => void;
+  forfeitSessionCoin: () => void;
+  restoreStudentCoinsToFive: (studentId: string) => Promise<void>;
+  simulateElapsedCooldown: (studentId: string) => void;
   toggleCriteriaTask: (taskId: string) => Promise<void>;
   verifyCriteriaTask: (taskId: string) => Promise<void>;
   uploadResumeData: (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume) => Promise<ParsedResume>;
   updateCodingHandles: (handles: Partial<CodingHandles>) => Promise<void>;
-  applyWsTurnResult: (data: WsTurnResultData, turnNumber: number) => void;
+  selectedProgram: DynamicProgram | null;
+  setSelectedProgram: React.Dispatch<React.SetStateAction<DynamicProgram | null>>;
+  viewProgramDetail: (prog: DynamicProgram) => void;
+  viewProgramLogs: (prog?: DynamicProgram) => void;
+  deleteAssignment: (id: string) => Promise<boolean>;
+  selectedAssessmentId: string | null;
+  setSelectedAssessmentId: React.Dispatch<React.SetStateAction<string | null>>;
+  viewAssessmentActivity: () => void;
+  viewAssessmentSubmissions: (asgId: string) => void;
+  notifications: AppNotification[];
+  unreadNotificationCount: number;
+  markNotificationAsRead: (id: string) => void;
+  markAllNotificationsAsRead: () => void;
+  clearNotifications: () => void;
+  impersonationSession: ImpersonationSession | null;
+  inspectedStudent: StudentProfile | any | null;
+  setInspectedStudent: React.Dispatch<React.SetStateAction<StudentProfile | any | null>>;
+  openStudentDashboard: (studentOrId: string | any) => Promise<void>;
+  openAdminDashboard: (targetAdmin: {
+    role: UserRole;
+    name: string;
+    email: string;
+    collegeId?: string;
+    collegeName?: string;
+    programName?: string;
+    department?: string;
+    permissions?: AdminPermission[];
+  }) => void;
+  returnToOriginalDashboard: () => void;
+  theme: 'light' | 'dark';
+  setTheme: (theme: 'light' | 'dark') => void;
+  toggleTheme: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -101,47 +225,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'register_institution'>('login');
+  const [confirmSignOutOpen, setConfirmSignOutOpen] = useState(false);
+  const [abandonWarningOpen, setAbandonWarningOpen] = useState(false);
+  const abandonWarningOpenRef = useRef<boolean>(abandonWarningOpen);
+  abandonWarningOpenRef.current = abandonWarningOpen;
+  const confirmSignOutOpenRef = useRef<boolean>(confirmSignOutOpen);
+  const [inspectedStudent, setInspectedStudent] = useState<StudentProfile | any | null>(null);
 
-  const [activeRole, setActiveRole] = useState<UserRole>(() => {
+  // Dark Mode Theme state with localStorage persistence & system preference detection
+  const [theme, setThemeState] = useState<'light' | 'dark'>(() => {
     try {
-      const saved = localStorage.getItem('auth_user');
-      if (saved) {
-        return JSON.parse(saved).role || 'STUDENT';
+      const saved = localStorage.getItem('crp_theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        return 'dark';
       }
     } catch {}
-    return 'STUDENT';
+    return 'light';
   });
-  const [activeView, setActiveView] = useState<'DASHBOARD' | 'INTERVIEW_ROOM' | 'LISTENING_ROOM' | 'REPORT_VIEW'>('DASHBOARD');
-  const [student, setStudent] = useState<StudentProfile>(() => {
+
+  const setTheme = useCallback((newTheme: 'light' | 'dark') => {
+    setThemeState(newTheme);
     try {
-      const saved = localStorage.getItem('auth_user');
-      if (saved) {
-        const u = JSON.parse(saved);
-        if (u.role === 'STUDENT') {
-          return {
-            id: u.studentId || u.id,
-            name: u.name,
-            rollNumber: u.rollNumber || '22CS1001',
-            email: u.email,
-            department: u.department || 'Computer Science & Engineering',
-            batchYear: u.batchYear || 2026,
-            track: u.track || 'HOPE_ELITE',
-            mentorName: 'Dr. S. Ranganathan',
-            mentorEmail: 'ranganathan.s@college.edu',
-            codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
-            resume: null,
-            criteriaTasks: INITIAL_CRITERIA_TASKS.map(t => ({ ...t, isCompleted: false, verifiedByMentor: false })),
-            recentReports: []
-          };
-        }
+      localStorage.setItem('crp_theme', newTheme);
+      if (newTheme === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.style.colorScheme = 'dark';
+      } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
+        document.documentElement.style.colorScheme = 'light';
       }
     } catch {}
-    return DEFAULT_CLEAN_STUDENT;
-  });
-  const [trainerTenures, setTrainerTenures] = useState<TrainerTenure[]>(MOCK_TRAINER_TENURES);
-  const [assignments, setAssignments] = useState<InterviewAssignment[]>(MOCK_ASSIGNMENTS);
-  const [latestReport, setLatestReport] = useState<DiagnosticReport | null>(null);
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(theme === 'dark' ? 'light' : 'dark');
+  }, [theme, setTheme]);
+
+  useEffect(() => {
+    try {
+      if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.style.colorScheme = 'dark';
+      } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
+        document.documentElement.style.colorScheme = 'light';
+      }
+    } catch {}
+  }, [theme]);
+  const isAuthenticatedRef = useRef<boolean>(isAuthenticated);
 
   const [interviewState, setInterviewState] = useState<InterviewSessionState>({
     isActive: false,
@@ -152,131 +289,905 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     questions: MOCK_INTERVIEW_QUESTIONS,
     tabSwitches: 0,
     isFlagged: false,
+    isDisqualified: false,
+    disqualificationReason: undefined,
     orbState: 'SPEAKING',
     liveTranscript: ''
   });
+  const interviewStateRef = useRef<InterviewSessionState>(interviewState);
+  interviewStateRef.current = interviewState;
 
-  // ── Hydrate auth state on mount ──────────────────────────────────────────
-  // If a stored token exists, validate it against the backend and restore user state.
-  // This ensures that a page refresh picks up the correct user role/name rather than
-  // relying solely on the cached localStorage auth_user JSON.
   useEffect(() => {
-    const token = localStorage.getItem('auth_token');
-    if (!token) return;
+    isAuthenticatedRef.current = isAuthenticated;
+  }, [isAuthenticated]);
 
-    api.auth.me()
-      .then(data => {
-        const authUser: AuthUser = {
-          id: data.user.id,
-          name: data.user.name,
-          email: data.user.email,
-          role: data.user.role as any,
-          studentId: data.studentId ?? undefined,
-        };
-        setCurrentUser(authUser);
-        setActiveRole(data.user.role as any);
-        setIsAuthenticated(true);
-        localStorage.setItem('auth_user', JSON.stringify(authUser));
+  const [activeRole, setActiveRole] = useState<UserRole>(() => {
+    try {
+      const saved = localStorage.getItem('auth_user');
+      if (saved) {
+        return JSON.parse(saved).role || 'STUDENT';
+      }
+    } catch {}
+    return 'STUDENT';
+  });
+  const getInitialView = (): AppView => {
+    if (typeof window === 'undefined') return 'DASHBOARD';
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('page') === 'activate' || params.has('invite_token')) {
+      return 'ACTIVATE_INVITE';
+    }
+    const hash = window.location.hash;
+    return HASH_TO_VIEW[hash] || 'DASHBOARD';
+  };
 
-        if (data.user.role === 'STUDENT' && data.studentId) {
-          api.student.getProfile(data.studentId)
-            .then(prof => {
-              setStudent(prof);
-              setLatestReport(prof.recentReports?.[0] ?? null);
-            })
-            .catch(() => {}); // Profile fetch failure is non-critical
+  const [activeView, setActiveViewState] = useState<AppView>(getInitialView);
+  const activeViewRef = useRef<AppView>(activeView);
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  const lastBackActionTimeRef = useRef<number>(0);
+
+  const setActiveView = (nextView: AppView, replace: boolean = false) => {
+    if (nextView === activeViewRef.current) return;
+    activeViewRef.current = nextView;
+    setActiveViewState(nextView);
+    logger.info('NAV', `View: ${nextView}`);
+
+    const targetHash = VIEW_TO_HASH[nextView] || '#/dashboard';
+    try {
+      if (replace) {
+        window.history.replaceState({ crpApp: true, view: nextView }, '', targetHash);
+      } else {
+        window.history.pushState({ crpApp: true, view: nextView }, '', targetHash);
+      }
+    } catch (err) {
+      console.warn('History navigation error:', err);
+    }
+  };
+
+  const triggerBackNavigation = useCallback(() => {
+    const now = Date.now();
+    if (now - lastBackActionTimeRef.current < 350) return;
+    lastBackActionTimeRef.current = now;
+
+    // A. If abandon warning is ALREADY open, KEEP IT OPEN!
+    // Do NOT dismiss it, do NOT exit. It requires explicit candidate choice.
+    if (abandonWarningOpenRef.current) {
+      logger.info('NAV', 'Back action ignored: abandon warning dialog is staying open');
+      return;
+    }
+
+    // B. If confirm sign out modal is ALREADY open, KEEP IT OPEN!
+    if (confirmSignOutOpenRef.current) {
+      logger.info('NAV', 'Back action ignored: confirm sign out dialog is staying open');
+      return;
+    }
+
+    // 1. If any registered content modal is active in modalManager, dismiss it
+    if (closeTopModal()) {
+      logger.info('NAV', 'Back action: dismissed modal');
+      return;
+    }
+
+    // 2. Direct modal fallbacks if any were not registered
+    if (authModalOpen) {
+      setAuthModalOpen(false);
+      return;
+    }
+    if (inspectedStudent) {
+      setInspectedStudent(null);
+      return;
+    }
+
+    // 3. Active assessment session protection (INTERVIEW_ROOM or LISTENING_ROOM):
+    // If user is inside an in-progress session, ask warning about forfeiting coin!
+    if (
+      (activeViewRef.current === 'INTERVIEW_ROOM' || activeViewRef.current === 'LISTENING_ROOM') &&
+      !interviewStateRef.current.isCompletedAwaitingEvaluation
+    ) {
+      logger.info('NAV', 'Back action in active assessment -> opening abandon warning');
+      lastBackActionTimeRef.current = Date.now() + 800;
+      setAbandonWarningOpen(true);
+      return;
+    }
+
+    // 4. Sub-view navigation: return to DASHBOARD (matches on-screen "Back to Dashboard" button)
+    if (activeViewRef.current !== 'DASHBOARD') {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      activeViewRef.current = 'DASHBOARD';
+      setActiveViewState('DASHBOARD');
+      logger.info('NAV', 'Back action: returned to DASHBOARD');
+
+      try {
+        window.history.pushState({ crpApp: true, view: 'DASHBOARD' }, '', '#/dashboard');
+      } catch {}
+      return;
+    }
+
+    // 5. On HOME PAGE (DASHBOARD):
+    // When someone tries to go back from the home page, ask for signout to return to landing page!
+    if (isAuthenticatedRef.current) {
+      logger.info('NAV', 'Back action on home page -> asking for sign out');
+      lastBackActionTimeRef.current = Date.now() + 800;
+      setConfirmSignOutOpen(true);
+    }
+  }, [authModalOpen, inspectedStudent]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const initial = getInitialView();
+    const targetHash = VIEW_TO_HASH[initial] || '#/dashboard';
+
+    // Seed root guard if history stack does not have our markers
+    if (!window.history.state || (!window.history.state.crpGuard && !window.history.state.crpApp)) {
+      window.history.replaceState({ crpGuard: true }, '', window.location.href);
+      window.history.pushState({ crpApp: true, view: initial }, '', targetHash);
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const now = Date.now();
+      if (now - lastBackActionTimeRef.current < 300) {
+        return;
+      }
+      lastBackActionTimeRef.current = now;
+
+      // A. If abandon warning is ALREADY open, KEEP IT OPEN! Re-push room hash so history stack stays pinned
+      if (abandonWarningOpenRef.current) {
+        const roomHash = VIEW_TO_HASH[activeViewRef.current] || '#/dashboard';
+        window.history.pushState({ crpApp: true, view: activeViewRef.current }, '', roomHash);
+        logger.info('NAV', 'PopState while abandon warning is active -> kept open');
+        return;
+      }
+
+      // B. If confirm sign out modal is ALREADY open, KEEP IT OPEN! Re-push dashboard hash
+      if (confirmSignOutOpenRef.current) {
+        window.history.pushState({ crpApp: true, view: 'DASHBOARD' }, '', '#/dashboard');
+        logger.info('NAV', 'PopState while sign out modal is active -> kept open');
+        return;
+      }
+
+      // 1. Modal dismissal on back navigation for normal overlays
+      if (closeTopModal()) {
+        const targetHash = VIEW_TO_HASH[activeViewRef.current] || '#/dashboard';
+        window.history.pushState({ crpApp: true, view: activeViewRef.current }, '', targetHash);
+        return;
+      }
+      if (authModalOpen) {
+        setAuthModalOpen(false);
+        const targetHash = VIEW_TO_HASH[activeViewRef.current] || '#/dashboard';
+        window.history.pushState({ crpApp: true, view: activeViewRef.current }, '', targetHash);
+        return;
+      }
+      if (inspectedStudent) {
+        setInspectedStudent(null);
+        const targetHash = VIEW_TO_HASH[activeViewRef.current] || '#/dashboard';
+        window.history.pushState({ crpApp: true, view: activeViewRef.current }, '', targetHash);
+        return;
+      }
+
+      // 2. Active assessment room protection on back navigation:
+      if (
+        (activeViewRef.current === 'INTERVIEW_ROOM' || activeViewRef.current === 'LISTENING_ROOM') &&
+        !interviewStateRef.current.isCompletedAwaitingEvaluation
+      ) {
+        const roomHash = VIEW_TO_HASH[activeViewRef.current] || '#/dashboard';
+        window.history.pushState({ crpApp: true, view: activeViewRef.current }, '', roomHash);
+        logger.info('NAV', 'Popstate in active assessment -> prompting abandon warning');
+        lastBackActionTimeRef.current = Date.now() + 800;
+        setAbandonWarningOpen(true);
+        return;
+      }
+
+      // 3. Guard check: Root guard or outside app boundary
+      if (!event.state || event.state.crpGuard || !event.state.crpApp) {
+        window.history.pushState({ crpApp: true, view: 'DASHBOARD' }, '', '#/dashboard');
+        if (activeViewRef.current !== 'DASHBOARD') {
+          if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+          }
+          activeViewRef.current = 'DASHBOARD';
+          setActiveViewState('DASHBOARD');
+        } else {
+          // While on the home page (DASHBOARD), asking for signout when user goes back!
+          if (isAuthenticatedRef.current) {
+            lastBackActionTimeRef.current = Date.now() + 800;
+            setConfirmSignOutOpen(true);
+          }
         }
-      })
-      .catch(() => {
-        // Token invalid or backend unreachable — clear stale auth state
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('auth_user');
-        setIsAuthenticated(false);
-        setCurrentUser(null);
-      });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+        return;
+      }
 
-  // Handle Tab switches when in interview room with proctor audit sync
+      // 4. Popped view navigation
+      const poppedView = event.state.view as AppView;
+      if (poppedView && poppedView !== activeViewRef.current) {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+        }
+        activeViewRef.current = poppedView;
+        setActiveViewState(poppedView);
+      } else if (!poppedView && activeViewRef.current !== 'DASHBOARD') {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+        }
+        activeViewRef.current = 'DASHBOARD';
+        setActiveViewState('DASHBOARD');
+      } else if (activeViewRef.current === 'DASHBOARD' && isAuthenticatedRef.current) {
+        // Popped back on home page: ask for signout
+        lastBackActionTimeRef.current = Date.now() + 800;
+        setConfirmSignOutOpen(true);
+      }
+    };
+
+    // Helper: detect if pointer is inside a horizontally scrollable container with remaining scroll
+    const isHorizontallyScrollable = (target: EventTarget | null): boolean => {
+      let el = target as HTMLElement | null;
+      while (el && el !== document.body && el !== document.documentElement) {
+        if (el.scrollWidth > el.clientWidth + 8 && el.scrollLeft > 10) {
+          const overflowX = window.getComputedStyle(el).overflowX;
+          if (overflowX === 'auto' || overflowX === 'scroll') {
+            return true;
+          }
+        }
+        el = el.parentElement;
+      }
+      return false;
+    };
+
+    // Trackpad horizontal swipe back detection
+    let accumulatedDeltaX = 0;
+    let resetTimer: ReturnType<typeof setTimeout> | null = null;
+    let gestureCooldown = false;
+
+    const handleWheel = (e: WheelEvent) => {
+      // If either confirmation dialog is already open, ignore trackpad gestures entirely!
+      if (abandonWarningOpenRef.current || confirmSignOutOpenRef.current) {
+        accumulatedDeltaX = 0;
+        return;
+      }
+
+      if (gestureCooldown) return;
+
+      const absX = Math.abs(e.deltaX);
+      const absY = Math.abs(e.deltaY);
+
+      // Must be primarily horizontal movement
+      if (absX <= absY * 1.2 || absX < 12) {
+        return;
+      }
+
+      // Only negative deltaX is swiping two fingers to the right (back gesture)
+      if (e.deltaX >= 0) {
+        accumulatedDeltaX = 0;
+        return;
+      }
+
+      // Don't intercept if user is scrolling inside an inner horizontal container
+      if (isHorizontallyScrollable(e.target)) {
+        return;
+      }
+
+      accumulatedDeltaX += e.deltaX;
+
+      if (resetTimer) clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => {
+        accumulatedDeltaX = 0;
+      }, 220);
+
+      // Threshold: accumulated -60 or a single strong flick of -45
+      if (accumulatedDeltaX <= -60 || e.deltaX <= -45) {
+        accumulatedDeltaX = 0;
+        gestureCooldown = true;
+        setTimeout(() => {
+          gestureCooldown = false;
+        }, 450);
+
+        triggerBackNavigation();
+      }
+    };
+
+    // Touchscreen swipe back support (e.g. Surface or Windows touch displays)
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartTime = 0;
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        touchStartTime = Date.now();
+      }
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (abandonWarningOpenRef.current || confirmSignOutOpenRef.current) {
+        return;
+      }
+
+      if (e.changedTouches.length === 1) {
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        const deltaX = endX - touchStartX;
+        const deltaY = endY - touchStartY;
+        const duration = Date.now() - touchStartTime;
+
+        if (
+          duration < 550 &&
+          touchStartX < 90 &&
+          deltaX > 70 &&
+          Math.abs(deltaX) > Math.abs(deltaY) * 1.4
+        ) {
+          triggerBackNavigation();
+        }
+      }
+    };
+
+    // Keyboard Escape to dismiss modals
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (abandonWarningOpenRef.current) {
+          setAbandonWarningOpen(false);
+          lastBackActionTimeRef.current = Date.now() + 600;
+          e.preventDefault();
+          return;
+        }
+        if (confirmSignOutOpenRef.current) {
+          setConfirmSignOutOpen(false);
+          lastBackActionTimeRef.current = Date.now() + 600;
+          e.preventDefault();
+          return;
+        }
+        if (closeTopModal()) {
+          e.preventDefault();
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('wheel', handleWheel, { passive: true });
+    window.addEventListener('touchstart', handleTouchStart, { passive: true });
+    window.addEventListener('touchend', handleTouchEnd, { passive: true });
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('wheel', handleWheel);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('keydown', handleKeyDown);
+      if (resetTimer) clearTimeout(resetTimer);
+    };
+  }, [triggerBackNavigation]);
+  const getInitialCoins = (id?: string): number => {
+    if (!id) return 5;
+    try {
+      const saved = localStorage.getItem(`crp_student_coins_${id}`);
+      if (saved !== null) {
+        const parsed = parseInt(saved, 10);
+        if (!isNaN(parsed)) return Math.max(0, parsed);
+      }
+    } catch {}
+    return 5;
+  };
+
+  const [student, setStudent] = useState<StudentProfile>(() => {
+    try {
+      const saved = localStorage.getItem('auth_user');
+      if (saved) {
+        const u = JSON.parse(saved);
+        if (u.role === 'STUDENT') {
+          const studentId = u.studentId || u.id || 'stu-21cs1084';
+          return {
+            id: studentId,
+            name: u.name,
+            rollNumber: u.rollNumber || '22CS1001',
+            email: u.email,
+            department: u.department || 'Computer Science & Engineering',
+            batchYear: u.batchYear || 2026,
+            track: u.track || 'General Track',
+            mentorName: 'Dr. S. Ranganathan',
+            mentorEmail: 'ranganathan.s@college.edu',
+            codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
+            resume: null,
+            criteriaTasks: INITIAL_CRITERIA_TASKS.map(t => ({ ...t, isCompleted: false, verifiedByMentor: false })),
+            recentReports: [],
+            coins: getInitialCoins(studentId)
+          };
+        }
+      }
+    } catch {}
+    const defaultId = DEFAULT_CLEAN_STUDENT.id || 'stu-fresh';
+    return {
+      ...DEFAULT_CLEAN_STUDENT,
+      coins: getInitialCoins(defaultId)
+    };
+  });
+
+  const [sessionCoinAtStake, setSessionCoinAtStake] = useState<boolean>(false);
+
+  // Regains credit up until 5 (capped at 5) upon successful completion without disqualification
+  const restoreSessionCoin = () => {
+    setStudent(prev => {
+      const current = prev.coins ?? 0;
+      // Regains spent 1 coin and earns 1 bonus credit towards 5 (capped at 5)
+      const nextCoins = Math.min(5, current + 2);
+      const sKey = prev.id || 'stu-21cs1084';
+      try {
+        localStorage.setItem(`crp_student_coins_${sKey}`, String(nextCoins));
+        if (nextCoins > 0) {
+          localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
+        }
+      } catch {}
+      return { ...prev, coins: nextCoins, zeroCoinsAt: undefined };
+    });
+    setSessionCoinAtStake(false);
+  };
+
+  const forfeitSessionCoin = () => {
+    setSessionCoinAtStake(false);
+    setStudent(prev => {
+      const sKey = prev.id || 'stu-21cs1084';
+      if ((prev.coins ?? 0) === 0) {
+        try {
+          if (!localStorage.getItem(`crp_zero_coins_time_${sKey}`)) {
+            localStorage.setItem(`crp_zero_coins_time_${sKey}`, String(Date.now()));
+          }
+        } catch {}
+        return { ...prev, zeroCoinsAt: new Date().toISOString() };
+      }
+      return prev;
+    });
+  };
+
+  const requestExitAssessment = () => {
+    if (interviewState.isCompletedAwaitingEvaluation) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      setActiveView('DASHBOARD');
+      return;
+    }
+    lastBackActionTimeRef.current = Date.now() + 800;
+    setAbandonWarningOpen(true);
+  };
+
+  const cancelAbandonWarning = () => {
+    lastBackActionTimeRef.current = Date.now() + 600;
+    setAbandonWarningOpen(false);
+  };
+
+  const confirmAbandonSession = () => {
+    lastBackActionTimeRef.current = Date.now() + 600;
+    setAbandonWarningOpen(false);
+    forfeitSessionCoin();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+    setInterviewState(prev => ({
+      ...prev,
+      isActive: false,
+      orbState: 'IDLE'
+    }));
+    logger.info('ASSESS', 'Session abandoned: coin forfeited, returned to DASHBOARD');
+    setActiveView('DASHBOARD');
+  };
+
+  // Only Super Admin can restore all 5 credits when institutional student goes to 0
+  const restoreStudentCoinsToFive = async (studentId: string) => {
+    try {
+      localStorage.setItem(`crp_student_coins_${studentId}`, '5');
+      localStorage.removeItem(`crp_zero_coins_time_${studentId}`);
+    } catch {}
+
+    setStudent(prev => {
+      if (prev.id === studentId || prev.rollNumber === studentId) {
+        return { ...prev, coins: 5, zeroCoinsAt: undefined };
+      }
+      return prev;
+    });
+
+    setInspectedStudent((prev: any) => {
+      if (prev && (prev.id === studentId || prev.rollNumber === studentId)) {
+        return { ...prev, coins: 5, zeroCoinsAt: undefined };
+      }
+      return prev;
+    });
+
+    try {
+      await api.studentBatch.updateStudentDetails('col-1', studentId, {
+        coins: 5
+      });
+    } catch {}
+
+    logger.info('SUPER_ADMIN', `Super Admin restored all 5 credits for student ${studentId}`);
+  };
+
+  // Test / simulation helper for 3-day wait period
+  const simulateElapsedCooldown = (studentId: string) => {
+    const pastTime = Date.now() - (4 * 24 * 60 * 60 * 1000); // 4 days ago
+    try {
+      localStorage.setItem(`crp_zero_coins_time_${studentId}`, String(pastTime));
+    } catch {}
+    restoreStudentCoinsToFive(studentId);
+  };
+
+  // 3-Day wait period cooldown check for individually registered students
+  useEffect(() => {
+    const checkIndependentCooldown = () => {
+      const isIndep = student.isIndependent || currentUser?.isIndependent || student.department?.includes('Independent') || student.track === 'EXTERNAL';
+      if (isIndep && student.coins === 0) {
+        const sKey = student.id || 'stu-21cs1084';
+        const zeroStored = localStorage.getItem(`crp_zero_coins_time_${sKey}`);
+        if (zeroStored) {
+          const zeroTimestamp = parseInt(zeroStored, 10);
+          const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+          if (!isNaN(zeroTimestamp) && Date.now() - zeroTimestamp >= THREE_DAYS_MS) {
+            setStudent(prev => {
+              const prevKey = prev.id || 'stu-21cs1084';
+              try {
+                localStorage.setItem(`crp_student_coins_${prevKey}`, '5');
+                localStorage.removeItem(`crp_zero_coins_time_${prevKey}`);
+              } catch {}
+              return { ...prev, coins: 5, zeroCoinsAt: undefined };
+            });
+            logger.info('STUDENT', `3-day cooldown elapsed: Replenished 5 credits for independent student ${sKey}`);
+          }
+        } else {
+          localStorage.setItem(`crp_zero_coins_time_${sKey}`, String(Date.now()));
+        }
+      }
+    };
+
+    checkIndependentCooldown();
+    const timer = setInterval(checkIndependentCooldown, 5000);
+    return () => clearInterval(timer);
+  }, [student.isIndependent, student.department, student.track, student.coins, student.id]);
+  const [trainerTenures, setTrainerTenures] = useState<TrainerTenure[]>(MOCK_TRAINER_TENURES);
+  const [assignments, setAssignments] = useState<InterviewAssignment[]>(MOCK_ASSIGNMENTS);
+  const [activeAssignment, setActiveAssignment] = useState<InterviewAssignment | null>(null);
+  const [latestReport, setLatestReport] = useState<DiagnosticReport | null>(null);
+  const [isEvaluationPending, setIsEvaluationPending] = useState<boolean>(false);
+  const [newReportNotification, setNewReportNotification] = useState<{
+    reportId: string;
+    score: number;
+    title: string;
+    timestamp: number;
+  } | null>(null);
+
+  const dismissNewReportNotification = () => {
+    setNewReportNotification(null);
+  };
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
+
+  const [notifications, setNotifications] = useState<AppNotification[]>([
+    {
+      id: 'notif-1',
+      title: 'Mock Interview Assigned: Full Stack System Architecture',
+      message: 'Evaluates clear technical communication, trade-off reasoning, and structured problem solving. Due Oct 05.',
+      type: 'ASSIGNMENT_CREATED',
+      assignmentId: 'asg-1',
+      createdAt: '2026-09-20T10:00:00Z',
+      read: false
+    },
+    {
+      id: 'notif-2',
+      title: 'Listening Lab Assigned: FinPay Transaction Gateway',
+      message: 'Listen closely to transaction settlement flow narrative. Due Oct 08.',
+      type: 'ASSIGNMENT_CREATED',
+      assignmentId: 'asg-2',
+      createdAt: '2026-09-22T11:30:00Z',
+      read: false
+    },
+    {
+      id: 'notif-3',
+      title: 'Evaluation Completed: Mock Interview Turn',
+      message: 'Your score for Full Stack System Architecture is 86%. Recommended: Placement Ready.',
+      type: 'SESSION_COMPLETED',
+      assignmentId: 'asg-1',
+      createdAt: '2026-09-22T10:35:00Z',
+      read: true
+    }
+  ]);
+
+  const unreadNotificationCount = notifications.filter(n => !n.read).length;
+
+  const markNotificationAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+  };
+
+  const markAllNotificationsAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  };
+
+  const clearNotifications = () => {
+    setNotifications([]);
+  };
+
+  const viewAssessmentActivity = () => {
+    setActiveView('ASSESSMENT_ACTIVITY');
+  };
+
+  const viewAssessmentSubmissions = (asgId: string) => {
+    setSelectedAssessmentId(asgId);
+    setActiveView('ASSESSMENT_SUBMISSIONS');
+  };
+
+  const deleteAssignment = async (id: string): Promise<boolean> => {
+    try {
+      await api.admin.deleteAssignment(id);
+    } catch (e) {
+      console.warn('API delete assignment failed, removing locally:', e);
+    }
+    setAssignments(prev => prev.filter(a => a.id !== id));
+    logger.info('ASSIGN', `Revoked assignment: ${id}`);
+    return true;
+  };
+
+  useEffect(() => {
+    const fetchAssignments = async () => {
+      try {
+        const list = await api.admin.getAssignments(currentUser?.collegeId);
+        if (list && list.length > 0) {
+          setAssignments(list);
+        }
+      } catch (e) {
+        console.warn('Failed to load assignments:', e);
+      }
+    };
+    fetchAssignments();
+  }, [currentUser?.collegeId]);
+
+  const [disqualifiedAssignmentIds, setDisqualifiedAssignmentIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(`crp_disqualified_assignments_${student.id || 'stu-21cs1084'}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`crp_disqualified_assignments_${student.id || 'stu-21cs1084'}`);
+      setDisqualifiedAssignmentIds(saved ? JSON.parse(saved) : []);
+    } catch {
+      setDisqualifiedAssignmentIds([]);
+    }
+  }, [student.id]);
+
+  const isAssignmentDisqualified = (assignmentId: string): boolean => {
+    if (!assignmentId) return false;
+    if (disqualifiedAssignmentIds.includes(assignmentId)) return true;
+    const asg = assignments.find(a => a.id === assignmentId);
+    if (asg && asg.submissions) {
+      return asg.submissions.some(s => 
+        (s.studentId === student.id || s.studentRollNumber === student.rollNumber) && 
+        (s.status === 'DISQUALIFIED' || s.isDisqualified)
+      );
+    }
+    return false;
+  };
+
+  const completeAssignmentSubmission = async (
+    assignmentId: string, 
+    score: number, 
+    sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH',
+    status: 'COMPLETED' | 'FLAGGED' | 'DISQUALIFIED' = 'COMPLETED',
+    reason?: string
+  ) => {
+    const isDisq = status === 'DISQUALIFIED';
+    const submission: AssignmentSubmission = {
+      studentId: student.id || 'stu-21cs1084',
+      studentName: student.name || 'Aravind Kumar',
+      studentRollNumber: student.rollNumber || '21CS1084',
+      score: isDisq ? 0 : score,
+      sessionType,
+      submittedAt: new Date().toISOString(),
+      status,
+      isDisqualified: isDisq,
+      disqualificationReason: reason,
+      recommendation: isDisq ? 'DISQUALIFIED' : (score >= 80 ? 'PLACEMENT_READY' : 'ON_TRACK')
+    };
+    try {
+      const res = await api.admin.submitAssignment(assignmentId, submission);
+      if (res && res.assignment) {
+        setAssignments(prev => prev.map(a => a.id === assignmentId ? res.assignment : a));
+      }
+    } catch (e) {
+      console.warn('Failed to record assignment submission:', e);
+      setAssignments(prev => prev.map(a => {
+        if (a.id === assignmentId) {
+          const subs = a.submissions || [];
+          return {
+            ...a,
+            submissions: [...subs.filter(s => s.studentId !== submission.studentId), submission]
+          };
+        }
+        return a;
+      }));
+    }
+
+    if (isDisq) {
+      const alertNotif: AppNotification = {
+        id: `notif-${Date.now()}`,
+        title: `Disqualified: ${sessionType === 'LISTENING_COMPREHENSION' ? 'Listening Lab' : 'Mock Interview'}`,
+        message: reason || 'Interview terminated due to exceeding tab switch limit (4 tab switches). Re-attending this interview is prohibited.',
+        type: 'SYSTEM_ALERT',
+        assignmentId,
+        createdAt: new Date().toISOString(),
+        read: false
+      };
+      setNotifications(prev => [alertNotif, ...prev]);
+    } else {
+      const scoreNotif: AppNotification = {
+        id: `notif-${Date.now()}`,
+        title: `Evaluation Completed: ${sessionType === 'LISTENING_COMPREHENSION' ? 'Listening Lab' : 'Mock Interview'}`,
+        message: `Your score is ${score}%. ${score >= 75 ? 'Placement Ready benchmark achieved!' : 'Keep practicing to reach the 75% benchmark.'}`,
+        type: 'SESSION_COMPLETED',
+        assignmentId,
+        createdAt: new Date().toISOString(),
+        read: false
+      };
+      setNotifications(prev => [scoreNotif, ...prev]);
+    }
+  };
+
+  const disqualifyAssignment = async (assignmentId: string, reason = 'Exceeded maximum permitted tab switches (4 tab switches recorded).') => {
+    const studentKey = `crp_disqualified_assignments_${student.id || 'stu-21cs1084'}`;
+    const updatedIds = Array.from(new Set([...disqualifiedAssignmentIds, assignmentId]));
+    setDisqualifiedAssignmentIds(updatedIds);
+    try {
+      localStorage.setItem(studentKey, JSON.stringify(updatedIds));
+    } catch {}
+
+    const asg = assignments.find(a => a.id === assignmentId);
+    await completeAssignmentSubmission(
+      assignmentId,
+      0,
+      asg ? asg.sessionType : 'MOCK_INTERVIEW',
+      'DISQUALIFIED',
+      reason
+    );
+  };
+
+  const terminateDisqualifiedSession = async (assignmentId?: string) => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+
+    const reason = 'Exceeded 4 tab switches during proctored interview. Session ended immediately.';
+    const targetAsgId = assignmentId || activeAssignment?.id;
+
+    if (targetAsgId) {
+      await disqualifyAssignment(targetAsgId, reason);
+    }
+
+    const disqReport: DiagnosticReport = {
+      id: `rep-disq-${Date.now().toString().slice(-4)}`,
+      date: new Date().toISOString().split('T')[0],
+      sessionType: interviewState.type,
+      overallScore: 0,
+      technicalScore: 0,
+      communicationScore: 0,
+      averageWpm: 0,
+      totalFillerWords: 0,
+      fillerWordBreakdown: {},
+      skillBreakdown: [
+        { skill: 'Proctoring & Exam Integrity', score: 0, status: 'NEEDS_WORK', recommendation: 'Disqualified: Exceeded 4 tab switches limit.' }
+      ],
+      actionableNextSteps: [
+        'Session ended due to exceeding the proctoring threshold (4 tab switches). Re-attending this interview is permanently revoked.'
+      ],
+      tabSwitches: 4,
+      isFlagged: true,
+      isDisqualified: true,
+      disqualificationReason: reason
+    };
+
+    // Disqualified due to exceeding 4 tab switches: coin is forfeited and remains minused
+    setSessionCoinAtStake(false);
+
+    setLatestReport(disqReport);
+    setStudent(prev => ({
+      ...prev,
+      recentReports: [disqReport, ...prev.recentReports]
+    }));
+
+    setInterviewState(prev => ({
+      ...prev,
+      isActive: false,
+      tabSwitches: 4,
+      isFlagged: true,
+      isDisqualified: true,
+      disqualificationReason: reason,
+      orbState: 'IDLE'
+    }));
+  };
+
   useEffect(() => {
     const handleVisibilityChange = async () => {
       if (document.hidden && interviewState.isActive) {
-        setInterviewState(prev => {
-          const newSwitches = prev.tabSwitches + 1;
-          const flagged = newSwitches >= 4;
-          return {
+        const nextSwitches = interviewState.tabSwitches + 1;
+        if (nextSwitches >= 4) {
+          await terminateDisqualifiedSession(activeAssignment?.id);
+        } else {
+          setInterviewState(prev => ({
             ...prev,
-            tabSwitches: newSwitches,
-            isFlagged: flagged
-          };
-        });
-
-        if (interviewState.sessionId) {
-          api.interview.recordProctorEvent(interviewState.sessionId, 'TAB_SWITCH').catch(() => {});
+            tabSwitches: nextSwitches,
+            isFlagged: nextSwitches >= 4
+          }));
+          if (interviewState.sessionId) {
+            api.interview.recordProctorEvent(interviewState.sessionId, 'TAB_SWITCH').catch(() => {});
+          }
         }
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [interviewState.isActive, interviewState.sessionId]);
+  }, [interviewState.isActive, interviewState.tabSwitches, interviewState.sessionId, activeAssignment]);
 
   const startInterview = async (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' = 'MOCK_INTERVIEW') => {
-    setActiveView(type === 'MOCK_INTERVIEW' ? 'INTERVIEW_ROOM' : 'LISTENING_ROOM');
-
-    if (type !== 'MOCK_INTERVIEW') {
-      // Listening comprehension path unchanged
-      setInterviewState({
-        isActive: true,
-        sessionId: `ses_${Date.now()}`,
-        type,
-        turnIndex: 0,
-        currentDifficulty: 'EASY',
-        questions: MOCK_INTERVIEW_QUESTIONS,
-        tabSwitches: 0,
-        isFlagged: false,
-        orbState: 'SPEAKING',
-        liveTranscript: ''
-      });
+    if (activeAssignment && isAssignmentDisqualified(activeAssignment.id)) {
+      alert("Access Revoked: You have been permanently disqualified from this interview due to exceeding the proctoring limit (4 tab switches). You cannot attend this interview again.");
       return;
     }
 
-    const backendResume = {
-      name: student.name || '',
-      experience_level: 'fresher',
-      skills: {
-        languages: student.resume?.skills.languages ?? [],
-        frameworks: student.resume?.skills.frameworks ?? [],
-        databases: student.resume?.skills.databases ?? [],
-        tools: student.resume?.skills.tools ?? [],
-      },
-      projects: (student.resume?.projects ?? []).map(p => ({
-        title: p.title,
-        tech_stack: p.techStack ?? [],
-        description: p.description ?? '',
-      })),
-      summary: student.resume?.summary ?? '',
-    };
+    const currentCoins = student.coins ?? 5;
+    if (currentCoins < 1) {
+      alert("Insufficient Coins: You need at least 1 coin to attend an interview or communication session. Your balance is 0 Coins.");
+      return;
+    }
+
+    // Deduct 1 coin immediately upon entering session
+    const remainingCoins = Math.max(0, currentCoins - 1);
+    const sKey = student.id || 'stu-21cs1084';
+    try {
+      localStorage.setItem(`crp_student_coins_${sKey}`, String(remainingCoins));
+      if (remainingCoins === 0 && !localStorage.getItem(`crp_zero_coins_time_${sKey}`)) {
+        localStorage.setItem(`crp_zero_coins_time_${sKey}`, String(Date.now()));
+      }
+    } catch {}
+    setStudent(prev => ({ 
+      ...prev, 
+      coins: remainingCoins,
+      zeroCoinsAt: remainingCoins === 0 ? new Date().toISOString() : undefined
+    }));
+    setSessionCoinAtStake(true);
 
     try {
-      const data = await api.sessions.start(backendResume, { maxTurns: 10 });
-      const firstQ: QuestionTurn = {
-        id: `q_1_${Date.now()}`,
-        questionNumber: 1,
-        questionText: data.firstQuestion,
-        difficulty: 'EASY',
-        category: 'Introduction',
-      };
+      if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    } catch {}
+
+    setActiveView(type === 'MOCK_INTERVIEW' ? 'INTERVIEW_ROOM' : 'LISTENING_ROOM');
+
+    try {
+      const data = await api.interview.start(student.id || 'stu-21cs1084', type);
       setInterviewState({
         isActive: true,
         sessionId: data.sessionId,
         type,
         turnIndex: 0,
-        currentDifficulty: 'EASY',
-        questions: [firstQ],
+        currentDifficulty: data.firstQuestion.difficulty,
+        questions: [data.firstQuestion],
         tabSwitches: 0,
         isFlagged: false,
+        isDisqualified: false,
         orbState: 'SPEAKING',
-        liveTranscript: ''
+        liveTranscript: '',
+        isCompletedAwaitingEvaluation: false
       });
     } catch {
       setInterviewState({
@@ -288,10 +1199,142 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         questions: MOCK_INTERVIEW_QUESTIONS,
         tabSwitches: 0,
         isFlagged: false,
+        isDisqualified: false,
         orbState: 'SPEAKING',
-        liveTranscript: ''
+        liveTranscript: '',
+        isCompletedAwaitingEvaluation: false
       });
     }
+  };
+
+  const completeAssessmentAwaitingEvaluation = async (
+    type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION',
+    providedReport?: DiagnosticReport | null
+  ) => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+
+    const wasDisqualified = interviewState.isDisqualified || interviewState.tabSwitches >= 4;
+    if (!wasDisqualified) {
+      restoreSessionCoin();
+    } else {
+      setSessionCoinAtStake(false);
+    }
+
+    setInterviewState(prev => ({
+      ...prev,
+      isActive: false,
+      orbState: 'IDLE',
+      isCompletedAwaitingEvaluation: true
+    }));
+
+    setIsEvaluationPending(true);
+
+    // Simulate asynchronous background LLM evaluation
+    setTimeout(async () => {
+      let report: DiagnosticReport | null = providedReport || null;
+
+      if (!report && interviewState.sessionId) {
+        try {
+          report = await api.interview.finalize(interviewState.sessionId);
+        } catch (err) {
+          console.warn('Finalize error:', err);
+        }
+      }
+
+      if (!report) {
+        const turns = interviewState.questions;
+        const turnCount = Math.max(1, turns.length);
+        const avgTech = Math.round(turns.reduce((acc, t) => acc + (t.technicalScore || 80), 0) / turnCount);
+        const avgComm = Math.round(turns.reduce((acc, t) => acc + (t.communicationScore || 78), 0) / turnCount);
+        const avgWpm = Math.round(turns.reduce((acc, t) => acc + (t.wpm || 125), 0) / turnCount);
+        const totalFillers = turns.reduce((acc, t) => acc + (t.fillerWords || 0), 0);
+
+        report = {
+          id: `rep-${Date.now().toString().slice(-4)}`,
+          date: new Date().toISOString().split('T')[0],
+          sessionType: type,
+          overallScore: Math.round(avgTech * 0.70 + avgComm * 0.30),
+          technicalScore: avgTech,
+          communicationScore: avgComm,
+          averageWpm: avgWpm,
+          totalFillerWords: totalFillers || 2,
+          fillerWordBreakdown: { 'uh': Math.max(1, Math.round(totalFillers * 0.5)), 'like': Math.max(1, Math.round(totalFillers * 0.5)) },
+          skillBreakdown: [
+            { skill: `${student.track || 'General'} Core Competency`, score: avgTech, status: avgTech >= 80 ? 'STRONG' : 'MODERATE', recommendation: 'Consistent conceptual structure throughout the session.' },
+            { skill: 'Verbal Delivery & Pacing', score: avgComm, status: avgComm >= 80 ? 'STRONG' : 'MODERATE', recommendation: `Pacing averaged ${avgWpm} WPM.` }
+          ],
+          actionableNextSteps: [
+            `Your average pace was ${avgWpm} WPM. ${avgWpm >= 120 && avgWpm <= 150 ? 'Maintain this recruiter-optimal tempo.' : 'Aim for 120-150 WPM.'}`,
+            `Total verbal fillers: ${totalFillers}. Replace verbal fillers with quiet 1-second pauses.`,
+            `Articulate architectural trade-offs explicitly with space-time and fault tolerance analysis.`
+          ],
+          tabSwitches: interviewState.tabSwitches,
+          isFlagged: interviewState.isFlagged
+        };
+      }
+
+      setLatestReport(report);
+      setStudent(prev => ({
+        ...prev,
+        recentReports: [report!, ...prev.recentReports]
+      }));
+
+      if (activeAssignment && report) {
+        completeAssignmentSubmission(activeAssignment.id, report.overallScore, activeAssignment.sessionType);
+      }
+
+      // Add indication to notification list
+      const notifId = `notif-${Date.now()}`;
+      const newNotif: AppNotification = {
+        id: notifId,
+        title: type === 'LISTENING_COMPREHENSION' ? 'Listening Lab Evaluation Ready' : 'Interview Evaluation Ready',
+        message: 'Your results are ready, click here to view results.',
+        type: 'SESSION_COMPLETED',
+        reportId: report.id,
+        assignmentId: activeAssignment?.id,
+        createdAt: new Date().toISOString(),
+        read: false
+      };
+      setNotifications(prev => [newNotif, ...prev]);
+
+      // Set banner notification
+      setNewReportNotification({
+        reportId: report.id,
+        score: report.overallScore,
+        title: activeAssignment?.title || (type === 'LISTENING_COMPREHENSION' ? 'Listening Comprehension Lab' : 'AI Mock Technical Interview'),
+        timestamp: Date.now()
+      });
+
+      // Stack newly generated results onto Post-Interview Actionable Improvement Checklist
+      try {
+        const sKey = student.id || 'stu-21cs1084';
+        const saved = localStorage.getItem(`student_improvement_checklist_${sKey}`);
+        const currentList: ImprovementChecklistItem[] = saved ? JSON.parse(saved) : [];
+        const newItems: ImprovementChecklistItem[] = (report.actionableNextSteps || []).map((step, idx) => ({
+          id: `chk_${report!.id}_${idx}_${Date.now()}`,
+          week: `Target ${currentList.length + idx + 1}`,
+          title: step.length > 50 ? (step.split('.')[0] || step.slice(0, 48)) + '...' : step,
+          description: step,
+          category: (idx % 2 === 0 ? 'COMMUNICATION' : 'TECHNICAL') as any,
+          isCompleted: false
+        }));
+
+        if (newItems.length > 0) {
+          const updated = [...currentList, ...newItems];
+          localStorage.setItem(`student_improvement_checklist_${sKey}`, JSON.stringify(updated));
+          window.dispatchEvent(new Event('storage'));
+        }
+      } catch (err) {
+        console.warn('Failed stacking report on checklist:', err);
+      }
+
+      setIsEvaluationPending(false);
+    }, 4500);
   };
 
   const submitAnswer = async (answerText: string) => {
@@ -302,13 +1345,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const res = await api.interview.submitAnswer(sessId, answerText);
       if (res) {
         if (res.isCompleted && res.finalReport) {
-          setLatestReport(res.finalReport);
-          setStudent(prev => ({
-            ...prev,
-            recentReports: [res.finalReport!, ...prev.recentReports]
-          }));
-          setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
-          setActiveView('REPORT_VIEW');
+          await completeAssessmentAwaitingEvaluation('MOCK_INTERVIEW', res.finalReport);
           return;
         }
 
@@ -332,7 +1369,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[AppContext] Submit turn evaluation error:', e);
     }
 
-    // Local in-memory advance fallback
     setInterviewState(prev => {
       const currentQ = prev.questions[prev.turnIndex];
       const updatedQ: QuestionTurn = {
@@ -355,7 +1391,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ...prev,
           questions: updatedQuestions,
           orbState: 'IDLE',
-          liveTranscript: ''
+          liveTranscript: '',
+          isCompletedAwaitingEvaluation: true
         };
       }
 
@@ -374,199 +1411,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  const submitAudioAnswer = async (audioBlob: Blob, questionText: string, difficulty: string, turnNumber: number) => {
-    setInterviewState(prev => ({ ...prev, orbState: 'THINKING' }));
-    const sessId = interviewState.sessionId || `ses_${Date.now()}`;
-    try {
-      const data = await api.sessions.submitTurn(sessId, audioBlob, {
-        studentId: currentUser?.id || student.id || '',
-        questionText,
-        difficulty,
-        turnNumber,
-        domain: student.department || 'CSE',
-      });
-
-      const isCompleted = turnNumber >= (interviewState.questions.length);
-      if (isCompleted) {
-        const report: DiagnosticReport = {
-          id: `rep_${Date.now().toString().slice(-4)}`,
-          date: new Date().toISOString().split('T')[0],
-          sessionType: interviewState.type,
-          overallScore: data.overallScore,
-          technicalScore: data.technicalScore,
-          communicationScore: data.communicationScore,
-          averageWpm: data.audioMetrics?.paceWpm || 120,
-          totalFillerWords: data.audioMetrics?.fillerCount || 0,
-          fillerWordBreakdown: {},
-          skillBreakdown: [
-            { skill: 'Technical Knowledge', score: data.technicalScore, status: data.technicalScore >= 75 ? 'STRONG' : 'NEEDS_WORK', recommendation: data.feedback },
-            { skill: 'Communication Fluency', score: Math.round(data.audioMetrics?.fluencyScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.strengths },
-            { skill: 'Speech Clarity', score: Math.round(data.audioMetrics?.clarityScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.weaknesses },
-          ],
-          actionableNextSteps: [data.feedback, data.strengths, data.weaknesses].filter(Boolean),
-          tabSwitches: interviewState.tabSwitches,
-          isFlagged: interviewState.isFlagged,
-        };
-        setLatestReport(report);
-        setStudent(prev => ({ ...prev, recentReports: [report, ...prev.recentReports] }));
-        setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
-        setActiveView('REPORT_VIEW');
-      } else {
-        const nextQ: QuestionTurn = {
-          id: `q_${turnNumber + 1}_${Date.now()}`,
-          questionNumber: turnNumber + 1,
-          questionText: data.nextQuestionText || 'Thank you for your answer. What challenges have you faced?',
-          difficulty: (data.nextDifficulty || 'EASY') as Difficulty,
-          category: 'Technical',
-          conversationalResponse: data.conversationalResponse || undefined,
-        };
-        setInterviewState(prev => {
-          const updated = [...prev.questions];
-          updated[prev.turnIndex] = {
-            ...updated[prev.turnIndex],
-            studentAnswer: data.transcript,
-            technicalScore: data.technicalScore,
-            communicationScore: data.communicationScore,
-            wpm: data.audioMetrics?.paceWpm || 120,
-            fillerWords: data.audioMetrics?.fillerCount || 0,
-            feedback: data.feedback,
-            strengths: data.strengths,
-            weaknesses: data.weaknesses,
-          };
-          return {
-            ...prev,
-            turnIndex: prev.turnIndex + 1,
-            currentDifficulty: (data.nextDifficulty || 'MEDIUM') as Difficulty,
-            questions: [...updated, nextQ],
-            orbState: 'SPEAKING',
-            liveTranscript: '',
-          };
-        });
-      }
-    } catch (e) {
-      console.warn('[AppContext] Audio submit error, falling back to text:', e);
-      await submitAnswer(questionText);
-    }
-  };
-
-  const applyWsTurnResult = (data: WsTurnResultData, turnNumber: number) => {
-    const isCompleted = turnNumber >= (interviewState.questions.length);
-    if (isCompleted) {
-      const report: DiagnosticReport = {
-        id: `rep_${Date.now().toString().slice(-4)}`,
-        date: new Date().toISOString().split('T')[0],
-        sessionType: interviewState.type,
-        overallScore: data.overallScore,
-        technicalScore: data.technicalScore,
-        communicationScore: data.communicationScore,
-        averageWpm: data.audioMetrics?.paceWpm || 120,
-        totalFillerWords: data.audioMetrics?.fillerCount || 0,
-        fillerWordBreakdown: {},
-        skillBreakdown: [
-          { skill: 'Technical Knowledge', score: data.technicalScore, status: data.technicalScore >= 75 ? 'STRONG' : 'NEEDS_WORK', recommendation: data.feedback },
-          { skill: 'Communication Fluency', score: Math.round(data.audioMetrics?.fluencyScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.strengths },
-          { skill: 'Speech Clarity', score: Math.round(data.audioMetrics?.clarityScore ?? data.communicationScore), status: 'MODERATE', recommendation: data.weaknesses },
-        ],
-        actionableNextSteps: [data.feedback, data.strengths, data.weaknesses].filter(Boolean),
-        tabSwitches: interviewState.tabSwitches,
-        isFlagged: interviewState.isFlagged,
-      };
-      setLatestReport(report);
-      setStudent(prev => ({ ...prev, recentReports: [report, ...prev.recentReports] }));
-      setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
-      setActiveView('REPORT_VIEW');
-      return;
-    }
-
-    const nextQ: QuestionTurn = {
-      id: `q_${turnNumber + 1}_${Date.now()}`,
-      questionNumber: turnNumber + 1,
-      questionText: data.nextQuestionText || 'Thank you. Can you tell me more about your technical background?',
-      difficulty: (data.nextDifficulty || 'EASY') as Difficulty,
-      category: 'Technical',
-      conversationalResponse: data.conversationalResponse || undefined,
-    };
-
-    setInterviewState(prev => {
-      const updated = [...prev.questions];
-      if (updated[prev.turnIndex]) {
-        updated[prev.turnIndex] = {
-          ...updated[prev.turnIndex],
-          studentAnswer: data.transcript,
-          technicalScore: data.technicalScore,
-          communicationScore: data.communicationScore,
-          wpm: data.audioMetrics?.paceWpm || 120,
-          fillerWords: data.audioMetrics?.fillerCount || 0,
-          feedback: data.feedback,
-          strengths: data.strengths,
-          weaknesses: data.weaknesses,
-        };
-      }
-      return {
-        ...prev,
-        turnIndex: prev.turnIndex + 1,
-        currentDifficulty: (data.nextDifficulty || 'MEDIUM') as Difficulty,
-        questions: [...updated, nextQ],
-        orbState: 'SPEAKING',
-        liveTranscript: '',
-      };
-    });
-  };
-
   const endInterview = async () => {
-    const report: DiagnosticReport = {
-      id: `rep-${Date.now().toString().slice(-4)}`,
-      date: new Date().toISOString().split('T')[0],
-      sessionType: interviewState.type,
-      overallScore: Math.floor(Math.random() * 15) + 78,
-      technicalScore: Math.floor(Math.random() * 12) + 82,
-      communicationScore: Math.floor(Math.random() * 14) + 72,
-      averageWpm: Math.floor(Math.random() * 20) + 120,
-      totalFillerWords: Math.floor(Math.random() * 8) + 4,
-      fillerWordBreakdown: { 'uh': 4, 'um': 3, 'like': 2, 'actually': 1 },
-      skillBreakdown: [
-        { skill: 'Java & OOP Principles', score: 92, status: 'STRONG', recommendation: 'Outstanding precision regarding garbage collection and thread lifecycle.' },
-        { skill: 'Database Optimization (PostgreSQL)', score: 78, status: 'MODERATE', recommendation: 'Good knowledge of indexes; brush up on query planner explain output.' },
-        { skill: 'Distributed Messaging (Kafka)', score: 85, status: 'STRONG', recommendation: 'Clearly justified consumer group partitions and fault tolerance.' },
-        { skill: 'System Design & Tradeoffs', score: 58, status: 'NEEDS_WORK', recommendation: 'Review rate limiting algorithms (Token Bucket vs Leaky Bucket).' }
-      ],
-      actionableNextSteps: [
-        'Maintain current cadence! Your speaking rate of 128 WPM is right in the sweet spot (120–150 WPM).',
-        'Watch out for repeating "actually" at the start of technical sentences.',
-        'Study rate-limiting algorithms to polish your distributed system architecture answers.'
-      ],
-      tabSwitches: interviewState.tabSwitches,
-      isFlagged: interviewState.isFlagged
-    };
-
-    setLatestReport(report);
-    setStudent(prev => ({
-      ...prev,
-      recentReports: [report, ...prev.recentReports]
-    }));
-
-    setInterviewState(prev => ({ ...prev, isActive: false, orbState: 'IDLE' }));
-    setActiveView('REPORT_VIEW');
+    await completeAssessmentAwaitingEvaluation(interviewState.type);
   };
 
   const recordTabSwitch = async () => {
-    let newSwitches = interviewState.tabSwitches + 1;
-    let flagged = newSwitches >= 4;
+    if (!interviewState.isActive) return;
+    const newSwitches = interviewState.tabSwitches + 1;
+    if (newSwitches >= 4) {
+      await terminateDisqualifiedSession(activeAssignment?.id);
+      return;
+    }
 
     if (interviewState.sessionId) {
       try {
-        const res = await api.interview.recordProctorEvent(interviewState.sessionId, 'TAB_SWITCH');
-        newSwitches = res.tabSwitches;
-        flagged = res.isFlagged;
-      } catch (err) {
-        // Fallback local increment
-      }
+        await api.interview.recordProctorEvent(interviewState.sessionId, 'TAB_SWITCH');
+      } catch {}
     }
 
     setInterviewState(prev => ({
       ...prev,
       tabSwitches: newSwitches,
-      isFlagged: flagged
+      isFlagged: newSwitches >= 4
     }));
   };
 
@@ -588,21 +1454,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await api.admin.revokeTrainer(id);
     } catch {
-      // Local fallback
     }
     setTrainerTenures(prev => prev.map(t => t.id === id ? { ...t, isActive: false } : t));
   };
 
-  const createAssignment = async (asg: Omit<InterviewAssignment, 'id'>) => {
+  const createAssignment = async (asg: Partial<InterviewAssignment>): Promise<InterviewAssignment> => {
+    let createdAsg: InterviewAssignment;
     try {
-      const created = await api.admin.createAssignment(asg);
-      setAssignments(prev => [created, ...prev]);
+      createdAsg = await api.admin.createAssignment(asg);
     } catch {
-      const newAsg: InterviewAssignment = {
-        ...asg,
-        id: `asg-${Date.now()}`
+      createdAsg = {
+        id: `asg-${Date.now()}`,
+        title: asg.title || 'Practice Drill',
+        sessionType: asg.sessionType || 'MOCK_INTERVIEW',
+        assignedByRole: asg.assignedByRole || 'SUPER_ADMIN',
+        assignedByName: asg.assignedByName || 'Placement Cell',
+        targetScope: asg.targetScope || 'ALL_STUDENTS',
+        targetDomainOrTrack: asg.targetDomainOrTrack || 'All Batches',
+        dueDate: asg.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        isMandatory: asg.isMandatory ?? true,
+        createdAt: new Date().toISOString(),
+        submissions: [],
+        ...asg
       };
-      setAssignments(prev => [newAsg, ...prev]);
+    }
+    setAssignments(prev => [createdAsg, ...prev]);
+
+    // Dispatch real-time app notification
+    const newNotif: AppNotification = {
+      id: `notif-${Date.now()}`,
+      title: `${createdAsg.sessionType === 'LISTENING_COMPREHENSION' ? 'Listening Lab' : createdAsg.sessionType === 'BOTH' ? 'Assessment Combo' : 'Mock Interview'} Assigned: ${createdAsg.title}`,
+      message: `Assigned by ${createdAsg.assignedByName || 'Admin'}. Due: ${createdAsg.dueDate}${createdAsg.endTime ? ` at ${createdAsg.endTime}` : ''}.`,
+      type: 'ASSIGNMENT_CREATED',
+      assignmentId: createdAsg.id,
+      createdAt: new Date().toISOString(),
+      read: false
+    };
+    setNotifications(prev => [newNotif, ...prev]);
+
+    return createdAsg;
+  };
+
+  const startAssignedSession = async (assignment: InterviewAssignment) => {
+    if (isAssignmentDisqualified(assignment.id)) {
+      alert("Access Revoked: You have been permanently disqualified from this interview due to exceeding the proctoring limit (4 tab switches). You cannot attend this interview again.");
+      return;
+    }
+
+    const currentCoins = student.coins ?? 5;
+    if (currentCoins < 1) {
+      alert("Insufficient Coins: You need at least 1 coin to attend an interview or communication session. Your balance is 0 Coins.");
+      return;
+    }
+
+    try {
+      if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    } catch {}
+
+    setActiveAssignment(assignment);
+    if (assignment.sessionType === 'LISTENING_COMPREHENSION') {
+      await startInterview('LISTENING_COMPREHENSION');
+    } else {
+      await startInterview('MOCK_INTERVIEW');
     }
   };
 
@@ -621,7 +1536,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await api.tasks.verifyTask(student.id, taskId);
     } catch {
-      // Local fallback
     }
     setStudent(prev => ({
       ...prev,
@@ -652,7 +1566,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           projects: [
             {
               title: 'College Placement Readiness Engine',
-              description: 'Real-time AI diagnostic mock platform',
+              description: 'Real-time diagnostic assessment platform',
               techStack: ['React', 'Node.js', 'PostgreSQL']
             }
           ]
@@ -664,31 +1578,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateCodingHandles = async (handles: Partial<CodingHandles>): Promise<void> => {
-    setStudent(prev => ({
-      ...prev,
-      codingHandles: {
-        leetcode: handles.leetcode ?? prev.codingHandles?.leetcode ?? '',
-        codechef: handles.codechef ?? prev.codingHandles?.codechef ?? '',
-        hackerrank: handles.hackerrank ?? prev.codingHandles?.hackerrank ?? '',
-        github: handles.github ?? prev.codingHandles?.github ?? ''
-      }
-    }));
+    setStudent(prev => {
+      const updatedHandles: CodingHandles = {
+        ...prev.codingHandles,
+        ...handles
+      };
+      try {
+        localStorage.setItem(`student_handles_${prev.id}`, JSON.stringify(updatedHandles));
+      } catch {}
+      return {
+        ...prev,
+        codingHandles: updatedHandles
+      };
+    });
 
     try {
       if (student.id) {
-        await api.student.updateCodingHandles(student.id, {
-          leetcode: handles.leetcode ?? student.codingHandles?.leetcode ?? '',
-          codechef: handles.codechef ?? student.codingHandles?.codechef ?? '',
-          hackerrank: handles.hackerrank ?? student.codingHandles?.hackerrank ?? '',
-          github: handles.github ?? student.codingHandles?.github ?? ''
-        });
+        await api.student.updateCodingHandles(student.id, handles as any);
       }
-    } catch (err) {
-      console.warn('Update coding handles offline fallback:', err);
-    }
+    } catch {}
   };
 
-  const openAuthModal = (mode: 'login' | 'register' = 'login') => {
+  const [selectedProgram, setSelectedProgram] = useState<DynamicProgram | null>(() => {
+    try {
+      const saved = sessionStorage.getItem('crp_selected_program');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const viewProgramDetail = (prog: DynamicProgram) => {
+    setSelectedProgram(prog);
+    try {
+      sessionStorage.setItem('crp_selected_program', JSON.stringify(prog));
+    } catch {}
+    setActiveView('PROGRAM_DETAIL');
+  };
+
+  const viewProgramLogs = (prog?: DynamicProgram) => {
+    if (prog) {
+      setSelectedProgram(prog);
+      try {
+        sessionStorage.setItem('crp_selected_program', JSON.stringify(prog));
+      } catch {}
+    }
+    setActiveView('PROGRAM_LOGS');
+  };
+
+  const openAuthModal = (mode: 'login' | 'register' | 'register_institution' = 'login') => {
     setAuthModalMode(mode);
     setAuthModalOpen(true);
   };
@@ -700,18 +1638,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loginUser = async (email: string, password: string) => {
     const res = await api.auth.login(email, password);
     const user = res.user;
+
+    // Backend returns minimal user info: {id, name, email, role}
+    // Additional fields are optional and will be undefined for now
     const authUser: AuthUser = {
       id: user.id,
       name: user.name,
       email: user.email,
-      role: user.role,
-      studentId: res.studentId
+      role: user.role as UserRole,
+      studentId: res.studentId || undefined,
+      // Optional fields - backend doesn't provide these yet
+      collegeId: undefined,
+      collegeName: undefined,
+      programId: undefined,
+      programName: undefined,
+      department: undefined,
+      className: undefined,
+      assignedClassName: undefined,
+      assignedClasses: undefined,
+      subProgramName: undefined,
+      isIndependent: undefined,
+      permissions: undefined
     };
+
     setCurrentUser(authUser);
-    setActiveRole(user.role);
+    setActiveRole(user.role as UserRole);
     setIsAuthenticated(true);
     localStorage.setItem('auth_user', JSON.stringify(authUser));
     setAuthModalOpen(false);
+    logger.info('AUTH', `Login: ${authUser.email} (${authUser.role})`);
 
     if (user.role === 'STUDENT') {
       try {
@@ -733,6 +1688,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const loginWithAuthUser = (authUser: AuthUser, token?: string) => {
+    if (token) api.setToken(token);
+    setCurrentUser(authUser);
+    setActiveRole(authUser.role);
+    setIsAuthenticated(true);
+    localStorage.setItem('auth_user', JSON.stringify(authUser));
+    setAuthModalOpen(false);
+  };
+
+  const registerCandidate = async (data: { name: string; email: string; password?: string }) => {
+    const res = await api.auth.registerCandidate(data);
+    loginWithAuthUser(res.user, res.token);
+    try {
+      const prof = await api.student.getProfile(res.studentId);
+      if (prof) {
+        setStudent(prof);
+        setLatestReport(null);
+      }
+    } catch (err) {
+      console.warn('Profile fetch after candidate register:', err);
+    }
+  };
+
+  const registerInstitution = async (data: {
+    institutionName: string;
+    institutionCode: string;
+    campusCity: string;
+    adminName: string;
+    adminEmail: string;
+    password?: string;
+    contactPhone?: string;
+  }) => {
+    const res = await api.auth.registerInstitution(data);
+    loginWithAuthUser(res.user, res.token);
+    logger.info('INSTITUTION', `New institution self-registered: ${res.college.name} (${res.college.code}) by ${res.user.email}`);
+    return res;
+  };
+
+  const completeInviteActivation = async (token: string, password: string) => {
+    const res = await api.invites.completePasswordSetup(token, password);
+    loginWithAuthUser(res.user, res.token);
+  };
+
   const registerUser = async (data: any) => {
     const res = await api.auth.register(data);
     const user = res.user;
@@ -743,7 +1741,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       role: 'STUDENT',
       rollNumber: data.rollNumber,
       department: data.department,
-      track: data.track || 'HOPE_ELITE',
+      track: data.track || 'General Track',
       studentId: res.studentId
     };
     setCurrentUser(authUser);
@@ -758,7 +1756,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       rollNumber: data.rollNumber || 'PENDING',
       department: data.department || 'General Engineering',
       batchYear: Number(data.batchYear) || 2026,
-      track: data.track || 'HOPE_ELITE',
+      track: data.track || 'General Track',
       mentorName: 'Unassigned',
       mentorEmail: '',
       codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
@@ -804,20 +1802,193 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const logout = () => {
-    // Invalidate the JWT on the backend (increments token_version so the token
-    // is rejected by subsequent requests). Fire-and-forget — the token value is
-    // captured synchronously inside apiFetch before we clear localStorage below.
-    api.auth.logout().catch(() => {});
-    // Immediately clear local state so the UI resets without waiting for the network
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('auth_user');
+  const requestSignOut = () => {
+    lastBackActionTimeRef.current = Date.now() + 800;
+    setConfirmSignOutOpen(true);
+  };
+
+  const cancelSignOut = () => {
+    lastBackActionTimeRef.current = Date.now() + 600;
+    setConfirmSignOutOpen(false);
+  };
+
+  const confirmSignOut = () => {
+    setConfirmSignOutOpen(false);
+    logout();
+  };
+
+  const [impersonationSession, setImpersonationSession] = useState<ImpersonationSession | null>(null);
+
+  const openStudentDashboard = async (studentOrId: string | any) => {
+    let targetProfile: StudentProfile | null = null;
+
+    if (typeof studentOrId === 'object' && studentOrId !== null) {
+      const s = studentOrId;
+      targetProfile = {
+        id: s.id || `stu-${Date.now()}`,
+        name: s.name || 'Candidate',
+        rollNumber: s.rollNumber || s.roll_number || '22CS1001',
+        email: s.email || `${(s.name || 'student').toLowerCase().replace(/\s+/g, '.')}@college.edu`,
+        department: s.department || 'Computer Science & Engineering',
+        batchYear: s.batchYear || s.batch_year || 2026,
+        track: s.track || s.domain || 'General Track',
+        programId: s.programId,
+        programName: s.programName,
+        subProgramName: s.subProgramName,
+        mentorName: s.mentorName || s.mentor_name || 'Dr. S. Ranganathan',
+        mentorEmail: s.mentorEmail || s.mentor_email || 'ranganathan.s@college.edu',
+        codingHandles: s.codingHandles || { leetcodeSolved: 110, githubRepos: 12 },
+        resume: s.resume || null,
+        criteriaTasks: s.criteriaTasks || INITIAL_CRITERIA_TASKS,
+        improvementChecklist: s.improvementChecklist || [
+          { id: 'imp-1', week: 'Week 1', title: 'Speed & Fluency Modulation', description: 'Maintain 130-150 words per minute during system design intros.', isCompleted: true, completedAt: '2026-09-21' },
+          { id: 'imp-2', week: 'Week 2', title: 'Database Composite Index Trade-offs', description: 'Articulate B-Tree left-prefix rule without filler words.', isCompleted: true, completedAt: '2026-09-24' },
+          { id: 'imp-3', week: 'Week 3', title: 'Microservices Distributed Transaction', description: 'Explain Saga orchestration pattern with failure compensation steps.', isCompleted: false },
+          { id: 'imp-4', week: 'Week 4', title: 'FAANG Executive Communication', description: 'Lead end-to-end cloud scalability architectural review under time pressure.', isCompleted: false }
+        ],
+        recentReports: s.recentReports || [
+          {
+            id: 'rep-001',
+            date: '2026-09-26',
+            sessionType: 'MOCK_INTERVIEW',
+            overallScore: s.score || s.overallReadiness || 82,
+            technicalScore: 86,
+            communicationScore: 78,
+            averageWpm: 124,
+            totalFillerWords: 9,
+            fillerWordBreakdown: { 'um': 4, 'like': 3, 'you know': 2 },
+            skillBreakdown: [
+              { skill: 'Core Technical Proficiency', score: 88, status: 'STRONG', recommendation: 'Clear mastery of architecture' },
+              { skill: 'Verbal Fluency & Delivery', score: 76, status: 'MODERATE', recommendation: 'Reduce filler words during transitions' }
+            ],
+            actionableNextSteps: [
+              'Pause 2 seconds before answering rather than saying "um"',
+              'Practice explaining trade-offs concisely'
+            ],
+            tabSwitches: 0,
+            isFlagged: false
+          }
+        ],
+        overallReadiness: s.overallReadiness ?? s.score ?? 82,
+        coins: getInitialCoins(s.id || s.studentId || s.rollNumber),
+        zeroCoinsAt: s.zeroCoinsAt,
+        isIndependent: Boolean(s.isIndependent || s.department?.includes('Independent') || s.track === 'EXTERNAL')
+      };
+    } else {
+      const id = String(studentOrId);
+      try {
+        const p = await api.student.getProfile(id);
+        if (p && p.name) targetProfile = p;
+      } catch {}
+
+      if (!targetProfile) {
+        const all = await api.admin.getUsers({ role: 'STUDENT' }).then(users =>
+          users.length > 0 ? users : api.admin.getStudents()
+        ).catch(() => api.admin.getStudents());
+        const found = all.find((item: any) => item.id === id || item.rollNumber === id);
+        if (found) {
+          return openStudentDashboard(found);
+        }
+      }
+    }
+
+    if (!targetProfile) {
+      console.warn('Could not find student profile for', studentOrId);
+      return;
+    }
+
+    // Open dedicated Student Management Dashboard modal without switching active user or portal
+    setInspectedStudent(targetProfile);
+    logger.info('NAV', `Opened student management dashboard: ${targetProfile.name} (${targetProfile.rollNumber})`);
+  };
+
+  const openAdminDashboard = (targetAdmin: {
+    role: UserRole;
+    name: string;
+    email: string;
+    collegeId?: string;
+    collegeName?: string;
+    programName?: string;
+    department?: string;
+    permissions?: AdminPermission[];
+  }) => {
+    if (!impersonationSession) {
+      setImpersonationSession({
+        originalUser: currentUser || { id: 'admin', name: 'Admin', email: 'admin@college.edu', role: activeRole },
+        originalRole: activeRole,
+        originalStudent: student,
+        targetUser: {
+          id: `usr-${targetAdmin.role.toLowerCase()}-${Date.now()}`,
+          name: targetAdmin.name,
+          email: targetAdmin.email,
+          role: targetAdmin.role,
+          collegeId: targetAdmin.collegeId || currentUser?.collegeId,
+          collegeName: targetAdmin.collegeName || currentUser?.collegeName,
+          programName: targetAdmin.programName,
+          department: targetAdmin.department,
+          permissions: targetAdmin.permissions
+        }
+      });
+    }
+
+    setCurrentUser({
+      id: `usr-${targetAdmin.role.toLowerCase()}-${Date.now()}`,
+      name: targetAdmin.name,
+      email: targetAdmin.email,
+      role: targetAdmin.role,
+      collegeId: targetAdmin.collegeId || currentUser?.collegeId,
+      collegeName: targetAdmin.collegeName || currentUser?.collegeName,
+      programName: targetAdmin.programName,
+      department: targetAdmin.department,
+      permissions: targetAdmin.permissions
+    });
+    setActiveRole(targetAdmin.role);
+    activeViewRef.current = 'DASHBOARD';
+    setActiveViewState('DASHBOARD');
+    try {
+      window.history.pushState({ crpApp: true, view: 'DASHBOARD' }, '', '#/dashboard');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {}
+    logger.info('NAV', `Opened admin dashboard: ${targetAdmin.name} (${targetAdmin.role})`);
+  };
+
+  const returnToOriginalDashboard = () => {
+    if (!impersonationSession) return;
+    const { originalUser, originalRole, originalStudent } = impersonationSession;
+    setCurrentUser(originalUser);
+    setActiveRole(originalRole);
+    if (originalStudent) {
+      setStudent(originalStudent);
+    }
+    setImpersonationSession(null);
+    activeViewRef.current = 'DASHBOARD';
+    setActiveViewState('DASHBOARD');
+    try {
+      window.history.pushState({ crpApp: true, view: 'DASHBOARD' }, '', '#/dashboard');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {}
+    logger.info('NAV', `Returned to ${originalRole} dashboard`);
+  };
+
+  const logout = async () => {
+    logger.info('AUTH', `Sign out: ${currentUser?.email || 'User'}`);
+
+    // Call backend logout
+    try {
+      await api.auth.logout();
+    } catch (error) {
+      console.warn('Backend logout error:', error);
+      // Continue with local cleanup
+    }
+
     setCurrentUser(null);
     setIsAuthenticated(false);
     setActiveRole('STUDENT');
-    setActiveView('DASHBOARD');
+    setActiveView('DASHBOARD', true);
     setStudent(DEFAULT_CLEAN_STUDENT);
     setLatestReport(null);
+    setConfirmSignOutOpen(false);
+    setImpersonationSession(null);
   };
 
   return (
@@ -828,8 +1999,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       authModalMode,
       openAuthModal,
       closeAuthModal,
+      confirmSignOutOpen,
+      setConfirmSignOutOpen,
+      requestSignOut,
+      cancelSignOut,
+      confirmSignOut,
+      abandonWarningOpen,
+      requestExitAssessment,
+      cancelAbandonWarning,
+      confirmAbandonSession,
       loginUser,
+      loginWithAuthUser,
       registerUser,
+      registerCandidate,
+      registerInstitution,
+      completeInviteActivation,
       registerExternalUser,
       verifyEmailAndLogin,
       logout,
@@ -837,13 +2021,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActiveRole,
       activeView,
       setActiveView,
+      triggerBackNavigation,
       student,
       setStudent,
       interviewState,
       startInterview,
       submitAnswer,
-      submitAudioAnswer,
       endInterview,
+      completeAssessmentAwaitingEvaluation,
+      isEvaluationPending,
+      newReportNotification,
+      dismissNewReportNotification,
       recordTabSwitch,
       latestReport,
       trainerTenures,
@@ -851,11 +2039,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       revokeTrainer,
       assignments,
       createAssignment,
+      activeAssignment,
+      startAssignedSession,
+      completeAssignmentSubmission,
+      isAssignmentDisqualified,
+      disqualifyAssignment,
+      terminateDisqualifiedSession,
+      disqualifiedAssignmentIds,
+      sessionCoinAtStake,
+      restoreSessionCoin,
+      forfeitSessionCoin,
+      restoreStudentCoinsToFive,
+      simulateElapsedCooldown,
       toggleCriteriaTask,
       verifyCriteriaTask,
       uploadResumeData,
       updateCodingHandles,
-      applyWsTurnResult,
+      selectedProgram,
+      setSelectedProgram,
+      viewProgramDetail,
+      viewProgramLogs,
+      deleteAssignment,
+      selectedAssessmentId,
+      setSelectedAssessmentId,
+      viewAssessmentActivity,
+      viewAssessmentSubmissions,
+      notifications,
+      unreadNotificationCount,
+      markNotificationAsRead,
+      markAllNotificationsAsRead,
+      clearNotifications,
+      impersonationSession,
+      inspectedStudent,
+      setInspectedStudent,
+      openStudentDashboard,
+      openAdminDashboard,
+      returnToOriginalDashboard,
+      theme,
+      setTheme,
+      toggleTheme
     }}>
       {children}
     </AppContext.Provider>

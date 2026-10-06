@@ -34,7 +34,6 @@ const registerSchema = z.object({
   name: z.string().min(2).max(255),
   email: z.string().email().transform(s => s.toLowerCase()),
   password: z.string().min(8, 'Password must be at least 8 characters'),
-  rollNumber: z.string().min(1),
   batchId: z.string().uuid(),
   subdivisionId: z.string().uuid().optional(),
 });
@@ -45,20 +44,21 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
     sendError(res, new AppError(422, 'Validation failed', 'VALIDATION_ERROR'));
     return;
   }
-  const { name, email, password, rollNumber, batchId, subdivisionId } = parsed.data;
+  const { name, email, password, batchId, subdivisionId } = parsed.data;
 
   const client = await db.connect();
   try {
+    const { rows: batchRows } = await client.query<{ id: string; program_id: string }>(
+      'SELECT id, program_id FROM org.batches WHERE id = $1', [batchId]
+    );
+    if (batchRows.length === 0) {
+      throw new AppError(404, 'Batch not found', 'NOT_FOUND');
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     await client.query('BEGIN');
     try {
-      // Batch validation inside transaction — prevents TOCTOU race
-      const { rows: batchRows } = await client.query('SELECT id FROM org.batches WHERE id = $1', [batchId]);
-      if (batchRows.length === 0) {
-        throw new AppError(404, 'Batch not found', 'NOT_FOUND');
-      }
-
       const { rows: userRows } = await client.query<{ id: string }>(
         `INSERT INTO identity.users (name, email, password_hash, role, token_version, status)
          VALUES ($1, $2, $3, 'STUDENT', 0, 'ACTIVE') RETURNING id`,
@@ -66,9 +66,11 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
       );
       const userId = userRows[0].id;
 
+      // roll_number is required NOT NULL — generate a unique one from timestamp + random suffix
+      const rollNumber = `STU-${Date.now()}-${Math.floor(Math.random() * 9000) + 1000}`;
       const { rows: studentRows } = await client.query<{ id: string }>(
-        `INSERT INTO org.students (user_id, roll_number, batch_id, subdivision_id, coding_handles)
-         VALUES ($1, $2, $3, $4, '{}') RETURNING id`,
+        `INSERT INTO org.students (user_id, roll_number, batch_id, subdivision_id)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
         [userId, rollNumber, batchId, subdivisionId ?? null]
       );
       const studentId = studentRows[0].id;
@@ -89,7 +91,7 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
   } catch (err) {
     if (err instanceof AppError) { sendError(res, err); return; }
     if ((err as { code?: string }).code === '23505') {
-      sendError(res, new AppError(409, 'Email or roll number already registered', 'DUPLICATE_EMAIL'));
+      sendError(res, new AppError(409, 'Email already registered', 'DUPLICATE_EMAIL'));
       return;
     }
     sendError(res, err);
@@ -175,47 +177,6 @@ authRouter.post('/logout', authenticate, async (req: AuthRequest, res: Response)
   }
 });
 
-// ── POST /api/auth/change-password ───────────────────────────────────────────
-
-const ChangePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
-  newPassword: z.string().min(8).max(128),
-});
-
-authRouter.post('/change-password', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const parsed = ChangePasswordSchema.safeParse(req.body);
-    if (!parsed.success) throw new AppError(422, 'Invalid request body', 'VALIDATION_ERROR');
-
-    const { currentPassword, newPassword } = parsed.data;
-
-    const { rows } = await db.query<{ password_hash: string }>(
-      'SELECT password_hash FROM identity.users WHERE id = $1',
-      [req.user!.id],
-    );
-    if (rows.length === 0) throw new AppError(404, 'User not found', 'NOT_FOUND');
-
-    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
-    if (!valid) throw new AppError(401, 'Current password is incorrect', 'INVALID_PASSWORD');
-
-    if (currentPassword === newPassword) {
-      throw new AppError(400, 'New password must differ from current password', 'SAME_PASSWORD');
-    }
-
-    const newHash = await bcrypt.hash(newPassword, 12);
-    await db.query(
-      `UPDATE identity.users
-       SET password_hash = $1, token_version = token_version + 1, updated_at = now()
-       WHERE id = $2`,
-      [newHash, req.user!.id],
-    );
-
-    sendSuccess(res, { message: 'Password changed successfully' });
-  } catch (err) {
-    sendError(res, err);
-  }
-});
-
 // ── GET /api/auth/me ───────────────────────────────────────────────────────────
 
 authRouter.get('/me', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
@@ -233,5 +194,114 @@ authRouter.get('/me', authenticate, async (req: AuthRequest, res: Response): Pro
     });
   } catch (err) {
     sendError(res, err);
+  }
+});
+
+// ── POST /api/auth/accept-invite ───────────────────────────────────────────────
+// Accept an invitation and create user account
+
+const acceptInviteSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8, 'Password must be at least 8 characters')
+});
+
+authRouter.post('/accept-invite', async (req: Request, res: Response): Promise<void> => {
+  const parsed = acceptInviteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendError(res, new AppError(422, 'Validation failed', 'VALIDATION_ERROR'));
+    return;
+  }
+
+  const { token, password } = parsed.data;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Find invite by token
+    const inviteResult = await client.query(
+      `SELECT * FROM identity.invites
+       WHERE token = $1
+       AND status = 'PENDING'
+       AND expires_at > now()`,
+      [token]
+    );
+
+    if (inviteResult.rows.length === 0) {
+      throw new AppError(404, 'Invalid or expired invitation', 'INVALID_INVITE');
+    }
+
+    const invite = inviteResult.rows[0];
+
+    // Check if user already exists with this email
+    const existingUser = await client.query(
+      `SELECT id FROM identity.users WHERE email = $1`,
+      [invite.email]
+    );
+
+    if (existingUser.rows.length > 0) {
+      throw new AppError(409, 'User with this email already exists', 'USER_EXISTS');
+    }
+
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Create user account
+    const userResult = await client.query(
+      `INSERT INTO identity.users (
+        name,
+        email,
+        password_hash,
+        role,
+        token_version,
+        status
+      ) VALUES ($1, $2, $3, $4, 0, 'ACTIVE')
+      RETURNING id, name, email, role, token_version`,
+      [invite.name, invite.email, passwordHash, invite.role]
+    );
+
+    const user = userResult.rows[0];
+
+    // Update invite status
+    await client.query(
+      `UPDATE identity.invites
+       SET status = 'ACCEPTED',
+           accepted_by_user_id = $1,
+           accepted_at = now()
+       WHERE id = $2`,
+      [user.id, invite.id]
+    );
+
+    await client.query('COMMIT');
+
+    // Generate JWT token
+    const authUser: AuthUser = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      tokenVersion: user.token_version
+    };
+    const jwtToken = signToken(authUser);
+
+    sendSuccess(res, {
+      token: jwtToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      },
+      message: 'Invitation accepted successfully'
+    }, 201);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err instanceof AppError) {
+      sendError(res, err);
+      return;
+    }
+    sendError(res, err);
+  } finally {
+    client.release();
   }
 });

@@ -15,14 +15,16 @@ export interface UserRegisteredPayload {
 }
 
 export interface AttemptCompletedPayload {
-  attemptId: string;
-  assessmentId: string;
+  attemptId: string;          // assessment.assessment_attempts.id
   studentId: string;
-  assessmentType: string;
-  technicalScore: number;
-  communicationScore: number;
+  programId: string;
+  batchId: string;
+  subdivisionId?: string | null;
   overallScore: number;
-  reportId: string | null;
+  technicalScore?: number | null;
+  communicationScore?: number | null;
+  listeningScore?: number | null;
+  goal?: string;              // Learning goal — used to trigger Module 3 agent
 }
 
 export interface ChecklistItemToggledPayload {
@@ -36,6 +38,4 @@ export interface MentorVerifiedPayload {
   studentId: string;
   mentorId: string;
   verifiedAt: string;
-  checklistItemId: string | null;
-  outcome: 'VERIFIED' | 'REJECTED';
 }

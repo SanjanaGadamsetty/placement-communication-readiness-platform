@@ -41,9 +41,6 @@ communication-readiness-platform/backend/uploads/
 .DS_Store
 Thumbs.db
 
-# Garbage files created by botched shell commands (long names with && cp in them)
-frontend/public* && *
-
 # Local reference files (not pushed)
 CLAUDE.md
 AGENTS.md
